@@ -5,12 +5,16 @@
 //! through `Caller::data()` / `Caller::data_mut()`.
 
 use crate::avatar_state::{AvatarPose, AvatarState};
-use crate::chunk::{ChunkClaim, ChunkCoord, ChunkDht, ChunkEdit, ChunkState, ChunkStatePointer, ChunkStore};
+use crate::chunk::{
+    ChunkClaim, ChunkCoord, ChunkDht, ChunkEdit, ChunkState, ChunkStatePointer, ChunkStore,
+    ZoneJoinRequest, ZoneState,
+};
 use crate::input_state::InputState;
 use crate::ipfs::IpfsClient;
 use crate::peer_connection::PeerConnection;
 use anyhow::Result;
 use std::collections::{HashMap, VecDeque};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -99,6 +103,21 @@ pub struct HostState {
     owner_pubkey: String,
     /// IPFS node API used for publishing/fetching chunk state.
     ipfs_api: String,
+    /// The zone (chunk + its owner) the local player currently occupies.
+    current_zone: Option<ZoneInfo>,
+    /// The applied content of the current zone ("state stream").
+    zone_content: Option<ChunkState>,
+}
+
+/// Which peer currently hosts the zone the local player occupies.
+#[derive(Debug, Clone)]
+pub struct ZoneInfo {
+    /// The zone's chunk.
+    pub chunk: ChunkCoord,
+    /// The hosting peer's id.
+    pub owner: String,
+    /// The hosting peer's UDP address (resolved via the chunk DHT).
+    pub owner_addr: SocketAddr,
 }
 
 impl HostState {
@@ -136,6 +155,8 @@ impl HostState {
             chunk_states: HashMap::new(),
             owner_pubkey: String::new(),
             ipfs_api: crate::ipfs::IPFS_API.to_string(),
+            current_zone: None,
+            zone_content: None,
         }
     }
 
@@ -493,6 +514,133 @@ impl HostState {
         // Warm the cache: fetch + pin now, while the owner may still be online.
         if let Ok(bytes) = IpfsClient::new(self.ipfs_api.clone()).cat(&pointer.state_cid) {
             let _ = serde_json::from_slice::<ChunkState>(&bytes);
+        }
+    }
+
+    /// The zone the local player currently occupies, if any.
+    pub fn current_zone(&self) -> Option<&ZoneInfo> {
+        self.current_zone.as_ref()
+    }
+
+    /// The applied content of the current zone.
+    pub fn zone_content(&self) -> Option<&ChunkState> {
+        self.zone_content.as_ref()
+    }
+
+    /// Transitions the player into the zone containing `chunk`.
+    ///
+    /// This is the seamless zone handoff: when the player crosses from a chunk
+    /// owned by one peer into a chunk owned by another, the host
+    /// 1. disconnects from the previous owner's state stream,
+    /// 2. queries the chunk DHT for the new chunk's owner and address,
+    /// 3. connects directly to that peer,
+    /// 4. requests + downloads its live state.
+    ///
+    /// The world stays seamless; only the "server" changes transparently.
+    pub fn transition_zone(&mut self, chunk: ChunkCoord) -> Result<()> {
+        // 2. Query the DHT for the chunk's owner.
+        let owner = match self.chunk_registry.lock().unwrap().get(chunk).cloned() {
+            Some(entry) => entry,
+            None => {
+                println!("[zone] chunk ({},{}) has no known owner", chunk.x, chunk.z);
+                self.current_zone = None;
+                return Ok(());
+            }
+        };
+
+        // Same owner (or ourselves): just update the current zone.
+        let same_owner = self
+            .current_zone
+            .as_ref()
+            .map(|z| z.owner == owner.peer_id)
+            .unwrap_or(false);
+        if same_owner || owner.peer_id == self.peer_id {
+            self.current_zone = Some(ZoneInfo {
+                chunk,
+                owner: owner.peer_id,
+                owner_addr: owner.address,
+            });
+            return Ok(());
+        }
+
+        // 1. Disconnect from the previous owner's state stream.
+        if let Some(prev) = self.current_zone.take() {
+            println!(
+                "[zone] leaving chunk ({},{}) (owner {}) — dropping its state stream",
+                prev.chunk.x, prev.chunk.z, prev.owner
+            );
+        }
+        self.zone_content = None;
+
+        // 3. Connect directly to the new owner (address from the DHT).
+        if let Some(pc) = self.peer_connection_mut() {
+            pc.connect_direct(&owner.peer_id, owner.address);
+        }
+        println!(
+            "[zone] entering chunk ({},{}) (owner {} @ {})",
+            chunk.x, chunk.z, owner.peer_id, owner.address
+        );
+        self.current_zone = Some(ZoneInfo {
+            chunk,
+            owner: owner.peer_id.clone(),
+            owner_addr: owner.address,
+        });
+
+        // 4. Request + download the owner's live state.
+        let request = ZoneJoinRequest {
+            peer_id: self.peer_id.clone(),
+            chunk_x: chunk.x,
+            chunk_z: chunk.z,
+        };
+        if let Some(pc) = self.peer_connection() {
+            pc.send_udp(owner.address, &request.wire_bytes())?;
+        }
+        Ok(())
+    }
+
+    /// Handles an incoming zone-join request: the owner replies with its live
+    /// chunk state.
+    pub fn handle_zone_join_request(&mut self, req: &ZoneJoinRequest, addr: SocketAddr) -> Result<()> {
+        let chunk = ChunkCoord { x: req.chunk_x, z: req.chunk_z };
+        let state = self
+            .chunk_states
+            .get(&chunk)
+            .cloned()
+            .unwrap_or_else(|| ChunkState {
+                chunk,
+                owner: self.peer_id.clone(),
+                owner_pubkey: self.owner_pubkey.clone(),
+                modified_at: crate::chunk::now_ms(),
+                edits: Vec::new(),
+            });
+        let zone_state = ZoneState {
+            owner: self.peer_id.clone(),
+            chunk,
+            state,
+        };
+        println!(
+            "[zone] {} joined chunk ({},{}) — sending live state",
+            req.peer_id, req.chunk_x, req.chunk_z
+        );
+        if let Some(pc) = self.peer_connection() {
+            pc.send_udp(addr, &zone_state.wire_bytes())?;
+        }
+        Ok(())
+    }
+
+    /// Applies an incoming zone state (the new owner's live content).
+    pub fn handle_zone_state(&mut self, zone: &ZoneState) {
+        println!(
+            "[zone] received live state for chunk ({},{}) from '{}' ({} edits)",
+            zone.chunk.x,
+            zone.chunk.z,
+            zone.owner,
+            zone.state.edits.len()
+        );
+        self.zone_content = Some(zone.state.clone());
+        if let Some(z) = self.current_zone.as_mut() {
+            z.chunk = zone.chunk;
+            z.owner = zone.owner.clone();
         }
     }
 }

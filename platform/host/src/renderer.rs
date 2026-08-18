@@ -226,6 +226,7 @@ pub fn build_app(
             sync_avatar_scene,
             apply_avatar_pose,
             update_chunk_claims,
+            zone_transition,
             sync_remote_avatars,
             tint_remote_avatars,
             attach_cosmetics,
@@ -441,8 +442,19 @@ fn update_hud(runtime: Res<WasmRuntime>, mut query: Query<&mut Text, With<ScoreT
         None => "Wasm: running".to_string(),
     };
 
+    let zone_line = match store.data().current_zone() {
+        Some(zone) => format!(
+            "Zone: chunk ({},{}) @ {} ({} edits)",
+            zone.chunk.x,
+            zone.chunk.z,
+            zone.owner,
+            store.data().zone_content().map(|s| s.edits.len()).unwrap_or(0)
+        ),
+        None => "Zone: none".to_string(),
+    };
+
     let label = format!(
-        "Local Score: {local} | Remote Score: {remote_total}\n{peer_line}\n{sig_line}\n{wasm_line}"
+        "Local Score: {local} | Remote Score: {remote_total}\n{peer_line}\n{sig_line}\n{zone_line}\n{wasm_line}"
     );
     if text.sections[0].value != label {
         println!("[hud] {label}");
@@ -469,8 +481,11 @@ fn exit_after_wasm_error(
 
 /// Drains the peer socket and dispatches datagrams: 16-byte payloads are
 /// validated avatar poses (timestamped for stale-avatar cleanup), 4-byte
-/// payloads are tag scores broadcast by the remote guest.
-fn poll_network(store: &mut wasmtime::Store<HostState>) {
+/// payloads are tag scores broadcast by the remote guest, and longer payloads
+/// are chunk claims, chunk-state pointers, or zone-join/zone-state messages.
+///
+/// Made public so tests can drive the wire path directly.
+pub fn poll_network(store: &mut wasmtime::Store<HostState>) {
     let incoming = match store.data().peer_connection() {
         Some(pc) => pc.poll_incoming_from(),
         None => return,
@@ -520,6 +535,12 @@ fn poll_network(store: &mut wasmtime::Store<HostState>) {
                         "[chunk-state] cached '{}' for chunk ({},{})",
                         pointer.peer_id, pointer.chunk_x, pointer.chunk_z
                     );
+                } else if let Some(req) = crate::chunk::ZoneJoinRequest::from_wire(&payload) {
+                    if let Err(e) = store.data_mut().handle_zone_join_request(&req, addr) {
+                        eprintln!("[zone] join response failed: {e}");
+                    }
+                } else if let Some(zone) = crate::chunk::ZoneState::from_wire(&payload) {
+                    store.data_mut().handle_zone_state(&zone);
                 }
             }
         }
@@ -570,6 +591,27 @@ fn update_chunk_claims(
             coord.z
         ),
         Err(e) => println!("[chunk] claim failed: {e}"),
+    }
+}
+
+/// Handles seamless zone handoff: whenever the avatar crosses a chunk
+/// boundary, the host disconnects from the previous zone's state stream,
+/// resolves the new chunk's owner from the DHT, connects to it directly, and
+/// downloads its live state — the "server" changes transparently.
+fn zone_transition(
+    avatar: Res<AvatarStateHandle>,
+    runtime: Res<WasmRuntime>,
+    mut last: Local<Option<crate::chunk::ChunkCoord>>,
+) {
+    let pose = *avatar.0.lock().unwrap();
+    let coord = crate::chunk::ChunkCoord::at(pose.x, pose.z);
+    if *last == Some(coord) {
+        return;
+    }
+    *last = Some(coord);
+    let mut store = runtime.store.lock().unwrap();
+    if let Err(e) = store.data_mut().transition_zone(coord) {
+        println!("[zone] transition failed: {e}");
     }
 }
 

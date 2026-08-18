@@ -19,7 +19,7 @@ pub struct PeerConnection {
     peer_id: String,
     signal_addr: String,
     udp: UdpSocket,
-    ws: WebSocket<TcpStream>,
+    ws: Option<WebSocket<TcpStream>>,
     peers: HashMap<String, SocketAddr>,
 }
 
@@ -38,11 +38,25 @@ impl PeerConnection {
             peer_id,
             signal_addr: signal_addr.to_string(),
             udp,
-            ws: Self::open_ws(signal_addr)?,
+            ws: Some(Self::open_ws(signal_addr)?),
             peers: HashMap::new(),
         };
         pc.register()?;
         Ok(pc)
+    }
+
+    /// A UDP-only peer connection (no signaling WebSocket) — used by tests and
+    /// for direct links resolved from the chunk DHT.
+    pub fn udp_only(peer_id: impl Into<String>, udp_bind: &str) -> Result<Self> {
+        let udp = UdpSocket::bind(udp_bind)?;
+        udp.set_nonblocking(true)?;
+        Ok(Self {
+            peer_id: peer_id.into(),
+            signal_addr: String::new(),
+            udp,
+            ws: None,
+            peers: HashMap::new(),
+        })
     }
 
     /// Establishes a fresh WebSocket connection to the signaling server.
@@ -69,7 +83,7 @@ impl PeerConnection {
     /// Re-establishes the signaling WebSocket after the link went down, keeping
     /// the UDP socket (and therefore our P2P address and peer map) intact.
     pub fn reconnect(&mut self) -> Result<()> {
-        self.ws = Self::open_ws(&self.signal_addr)?;
+        self.ws = Some(Self::open_ws(&self.signal_addr)?);
         self.register()
     }
 
@@ -79,7 +93,8 @@ impl PeerConnection {
     /// link is dead; a timeout (nothing pending) means it is healthy. Stale
     /// messages the server had queued are discarded — the link is what matters.
     pub fn probe_signaling(&mut self) -> Result<()> {
-        match self.ws.read() {
+        let Some(ws) = self.ws.as_mut() else { return Ok(()); };
+        match ws.read() {
             Ok(Message::Close(_)) => bail!("signaling server closed the connection"),
             Ok(_) => Ok(()),
             Err(tungstenite::Error::Io(e))
@@ -95,8 +110,10 @@ impl PeerConnection {
     /// Gracefully closes the signaling WebSocket. Dropping this connection
     /// afterwards closes the underlying TCP socket and UDP socket.
     pub fn shutdown(&mut self) -> Result<()> {
-        self.ws.close(None)?;
-        self.ws.flush()?;
+        if let Some(ws) = self.ws.as_mut() {
+            ws.close(None)?;
+            ws.flush()?;
+        }
         Ok(())
     }
 
@@ -113,6 +130,13 @@ impl PeerConnection {
     /// Returns the known UDP address of `peer_id`, if a link was established.
     pub fn peer_addr(&self, peer_id: &str) -> Option<&SocketAddr> {
         self.peers.get(peer_id)
+    }
+
+    /// Establishes a direct link to `peer_id` at `addr` — used when the chunk
+    /// DHT resolves a zone's owner to its address without going through the
+    /// signaling server.
+    pub fn connect_direct(&mut self, peer_id: &str, addr: SocketAddr) {
+        self.peers.insert(peer_id.to_string(), addr);
     }
 
     /// Asks the signaling server to connect us to `target` and waits for the
@@ -225,13 +249,17 @@ impl PeerConnection {
     }
 
     fn send_signal(&mut self, v: &Value) -> Result<()> {
-        self.ws.send(Message::text(v.to_string()))?;
+        self.ws
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("no signaling connection"))?
+            .send(Message::text(v.to_string()))?;
         Ok(())
     }
 
     fn read_signal(&mut self) -> Result<Value> {
+        let ws = self.ws.as_mut().ok_or_else(|| anyhow::anyhow!("no signaling connection"))?;
         loop {
-            match self.ws.read() {
+            match ws.read() {
                 Ok(Message::Text(t)) => return Ok(serde_json::from_str(t.as_str())?),
                 Ok(Message::Close(_)) => bail!("signaling server closed connection"),
                 Ok(_) => {}

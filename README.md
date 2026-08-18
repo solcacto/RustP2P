@@ -229,6 +229,22 @@ Host functions: `save_chunk_state`, `publish_chunk_states`,
 (and the `--offline CID --ipfs API` mode against a second node to prove
 owner-offline loading).
 
+### Seamless zone transitions
+
+As a player walks from a chunk owned by one peer into a chunk owned by another,
+the **server changes transparently** — the world never blinks:
+
+1. the host **disconnects** from the previous zone owner's state stream,
+2. **queries the chunk DHT** for the new chunk's owner and address,
+3. **connects directly** to the new owner (no signaling needed — the address
+   comes from the DHT),
+4. sends a zone-join request and **downloads the owner's live state**.
+
+The HUD shows `Zone: chunk (x,z) @ owner (N edits)` as you move. Guest SDK
+`Context` exposes the host functions; the handoff itself is handled entirely
+host-side. Verify with `cargo run -p host --bin zone_transition_test` (a live
+UDP handoff between three peers).
+
 ## Run the game
 
 Open three terminals.
@@ -448,6 +464,7 @@ cargo run -p host --bin manifest_test               # manifest validation + hash
 cargo run -p host --bin avatar_standard_test        # avatar-standard validation
 cargo run -p host --bin chunk_test                  # spatial chunk math, claims, DHT
 cargo run -p host --bin chunk_state_test            # chunk state persistence + offline ruins*
+cargo run -p host --bin zone_transition_test        # seamless zone handoff (UDP)
 cargo run -p host --bin avatar_customization_test    # load_avatar + avatar selection
 cargo run -p host --bin cosmetic_signature_test      # signed cosmetic verification
 cargo run -p host --bin distribution_test            # IPFS publish/fetch round-trip*

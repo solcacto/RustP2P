@@ -22,6 +22,10 @@ pub const CHUNK_SIZE: f32 = 100.0;
 pub const CLAIM_TAG: u8 = 0x01;
 /// Wire tag marking a chunk-state pointer datagram.
 pub const STATE_TAG: u8 = 0x02;
+/// Wire tag marking a zone-join request (entering a peer's zone).
+pub const ZONE_JOIN_TAG: u8 = 0x03;
+/// Wire tag marking a zone state (a peer's live chunk state).
+pub const ZONE_STATE_TAG: u8 = 0x04;
 
 /// Local directory (inside the host crate) where owned chunk states persist.
 pub const CHUNKS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/chunks");
@@ -354,4 +358,62 @@ pub fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Sent by a player entering a peer's zone: "I am now in your chunk, send me
+/// the live state."
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZoneJoinRequest {
+    /// The requesting player's peer id.
+    pub peer_id: String,
+    /// The chunk (zone) being entered.
+    pub chunk_x: i32,
+    pub chunk_z: i32,
+}
+
+impl ZoneJoinRequest {
+    /// Serializes to a wire datagram: `[ZONE_JOIN_TAG] + JSON`.
+    pub fn wire_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(48);
+        out.push(ZONE_JOIN_TAG);
+        out.extend_from_slice(&serde_json::to_vec(self).unwrap_or_default());
+        out
+    }
+
+    /// Parses a wire datagram into a zone-join request, if it carries one.
+    pub fn from_wire(bytes: &[u8]) -> Option<Self> {
+        if bytes.first() != Some(&ZONE_JOIN_TAG) {
+            return None;
+        }
+        serde_json::from_slice(&bytes[1..]).ok()
+    }
+}
+
+/// A zone owner's live chunk state, sent in reply to a [`ZoneJoinRequest`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ZoneState {
+    /// The zone owner's peer id.
+    pub owner: String,
+    /// The chunk this state describes.
+    pub chunk: ChunkCoord,
+    /// The live state (edits) of the chunk.
+    pub state: ChunkState,
+}
+
+impl ZoneState {
+    /// Serializes to a wire datagram: `[ZONE_STATE_TAG] + JSON`.
+    pub fn wire_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(256);
+        out.push(ZONE_STATE_TAG);
+        out.extend_from_slice(&serde_json::to_vec(self).unwrap_or_default());
+        out
+    }
+
+    /// Parses a wire datagram into a zone state, if it carries one.
+    pub fn from_wire(bytes: &[u8]) -> Option<Self> {
+        if bytes.first() != Some(&ZONE_STATE_TAG) {
+            return None;
+        }
+        serde_json::from_slice(&bytes[1..]).ok()
+    }
 }
