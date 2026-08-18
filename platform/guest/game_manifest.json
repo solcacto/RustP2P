@@ -1,0 +1,11 @@
+{
+  "name": "Chase Tag",
+  "version": "0.1.0",
+  "author": "solcacto",
+  "wasm_entry": "guest.wasm",
+  "wasm_hash": "sha256:42e676796f1ff66b9fb8e107fa99db0f8133a2f453fb0c66dc74f188ff02350b",
+  "mode": "session",
+  "max_players": 8,
+  "avatar_skeleton": "standard_v1",
+  "host_functions_required": ["input", "network", "render"]
+}

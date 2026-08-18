@@ -62,13 +62,16 @@ Key properties:
 ```
 .
 ├── platform/
-│   ├── guest/                # The game — a Rust crate compiled to Wasm
-│   │   └── src/lib.rs        #   Chase/Tag logic (no_std, core only)
-│   ├── host/                 # The runtime
+│   ├── guest/                 # The game — a Rust crate compiled to Wasm
+│   │   ├── src/lib.rs         #   Chase/Tag logic (no_std, core only)
+│   │   ├── guest.wasm         #   Committed, hash-pinned game artifact
+│   │   └── game_manifest.json #   Game package manifest (pins the wasm hash)
+│   ├── host/                  # The runtime
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── host_functions.rs   # All sandbox escape hatches (env module)
 │   │       ├── host_state.rs       # Per-instance host state
+│   │       ├── manifest.rs         # Game manifest validation + hash verify
 │   │       ├── peer_connection.rs  # UDP + WebSocket signaling
 │   │       ├── renderer.rs         # Bevy scene, game loop, keyboard, HUD
 │   │       ├── avatar_state.rs / input_state.rs / input_poller.rs
@@ -77,6 +80,7 @@ Key properties:
 │   │       └── src/test_modules/   # WAT test guests (security/network/render)
 │   └── signaling_server/      # WebSocket discovery server
 ├── docs/
+│   ├── GAME_MANIFEST.md       # game_manifest.json format + validation
 │   ├── HOST_FUNCTIONS.md      # Host function reference
 │   └── SECURITY.md            # Full threat model
 ├── SECURITY.md                # Short summary + pointer to docs/SECURITY.md
@@ -104,9 +108,25 @@ cargo build -p guest --target wasm32-unknown-unknown --release
 cargo build --workspace
 ```
 
-The host loads the guest from
-`target/wasm32-unknown-unknown/release/guest.wasm`. If you forget step 1,
-`play_game` prints an error telling you to run it.
+### Game packages & manifest integrity
+
+The host loads a **game package**: a `game_manifest.json` plus the Wasm module
+it describes (see [`docs/GAME_MANIFEST.md`](docs/GAME_MANIFEST.md)). Before any
+Wasm runs, the host validates the manifest and refuses to load the module if
+its SHA-256 doesn't match the pinned `wasm_hash`.
+
+`platform/guest/` ships a committed, hash-pinned `guest.wasm` +
+`game_manifest.json`, so `play_game` works out of the box. After editing the
+guest, re-pin the artifact:
+
+```sh
+cargo build -p guest --target wasm32-unknown-unknown --release
+cp target/wasm32-unknown-unknown/release/guest.wasm platform/guest/guest.wasm
+cargo run -p host --bin hash_wasm -- platform/guest/guest.wasm
+# -> sha256:<hex>  (paste into game_manifest.json "wasm_hash")
+```
+
+If the hash ever mismatches, the host refuses to load the tampered artifact.
 
 ## Run the game
 
@@ -168,6 +188,7 @@ cargo run -p host --bin security_test               # sandbox attack suite
 cargo run -p host --bin game_loop                   # frame loop
 cargo run -p host --bin input_test                  # input getters
 cargo run -p host --bin network_wasm_test           # wasm<->wasm messages
+cargo run -p host --bin manifest_test               # manifest validation + hash gate
 cargo run -p host --bin render_test                 # 3D scene + wasm-driven pose
 cargo run -p host --bin multiplayer_test -- --role A   # needs 2 terminals
 cargo run -p host --bin multiplayer_test -- --role B
@@ -188,6 +209,8 @@ cargo doc --workspace --no-deps
 
 ## Documentation
 
+- [`docs/GAME_MANIFEST.md`](docs/GAME_MANIFEST.md) — the `game_manifest.json`
+  format, validation rules, and authoring workflow.
 - [`docs/HOST_FUNCTIONS.md`](docs/HOST_FUNCTIONS.md) — every host function:
   signature, security guarantees, and usage.
 - [`docs/SECURITY.md`](docs/SECURITY.md) — full threat model: what the sandbox

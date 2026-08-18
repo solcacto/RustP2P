@@ -3,24 +3,24 @@ use host::{
     avatar_state::{AvatarPose, AvatarState},
     host_functions,
     host_state::HostState,
+    manifest::GameManifest,
     peer_connection::PeerConnection,
     renderer,
 };
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use wasmtime::{Engine, Linker, Module, Store};
 
 const SIGNAL_SERVER: &str = "127.0.0.1:9001";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-const GUEST_WASM: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../target/wasm32-unknown-unknown/release/guest.wasm"
-);
+const GAME_PACKAGE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../guest");
+const MANIFEST_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../guest/game_manifest.json");
 
-/// Commit 10: the first real game. Loads the compiled `guest.wasm` (a Rust
-/// crate, not hand-written WAT), hooks real Bevy keyboard input into the host
-/// input buffer, and renders the Chase/Tag session with a live score HUD.
+/// Commit 12: loads a game *package* — a `game_manifest.json` plus its Wasm —
+/// validates the manifest, refuses to load if the pinned SHA-256 doesn't match,
+/// then runs the Chase/Tag session with real keyboard input and a score HUD.
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let role = args
@@ -48,13 +48,24 @@ fn main() -> Result<()> {
     let remote_avatars: Arc<Mutex<HashMap<String, AvatarPose>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
-    // Load the compiled guest game.
-    let wasm_bytes = std::fs::read(GUEST_WASM).with_context(|| {
+    // Load and validate the game package manifest, then load the Wasm it pins
+    // and verify the artifact's hash before trusting a single byte.
+    let manifest = GameManifest::from_path(MANIFEST_PATH)?;
+    println!(
+        "[{role}] game: {} v{} by {} (mode={:?}, max_players={})",
+        manifest.name, manifest.version, manifest.author, manifest.mode, manifest.max_players
+    );
+    let wasm_path = Path::new(GAME_PACKAGE_DIR).join(&manifest.wasm_entry);
+    let wasm_bytes = std::fs::read(&wasm_path).with_context(|| {
         format!(
-            "guest.wasm not found at {GUEST_WASM} — build it first:\n  \
-             cargo build -p guest --target wasm32-unknown-unknown --release"
+            "{} not found in game package {} — build the guest first:\n  \
+             cargo build -p guest --target wasm32-unknown-unknown --release && \
+             cp target/wasm32-unknown-unknown/release/guest.wasm platform/guest/guest.wasm",
+            manifest.wasm_entry,
+            GAME_PACKAGE_DIR
         )
     })?;
+    manifest.verify_wasm(&manifest.wasm_entry, &wasm_bytes)?;
     let wasm_size = wasm_bytes.len();
     let engine = Engine::default();
     let mut linker = Linker::new(&engine);
@@ -67,7 +78,10 @@ fn main() -> Result<()> {
     store.data_mut().set_peer_connection(Some(connect_with_retry(&local_id)?));
     let instance = linker.instantiate(&mut store, &module)?;
     let game_tick = instance.get_typed_func::<(), ()>(&mut store, "game_tick")?;
-    println!("[{role}] loaded guest.wasm ({wasm_size} bytes)");
+    println!(
+        "[{role}] verified + loaded {} ({wasm_size} bytes, hash OK)",
+        manifest.wasm_entry
+    );
 
     // Block until the other instance is registered and a P2P link is up.
     println!("[{role}] connecting to {remote_id} via signaling server...");
