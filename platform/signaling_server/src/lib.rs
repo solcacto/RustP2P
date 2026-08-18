@@ -59,6 +59,21 @@ fn handle_peer(stream: TcpStream, peers: PeerRegistry) -> Result<()> {
         .unwrap()
         .insert(peer_id.clone(), PeerInfo { address, outbox: outbox_tx });
 
+    // The peer is removed on every exit path (clean close or error) so a
+    // crashed/disconnected client never leaves a stale registration whose
+    // outbox channel is closed.
+    let result = serve_peer(&mut ws, &peer_id, &peers, &outbox_rx);
+    peers.lock().unwrap().remove(&peer_id);
+    println!("Peer '{peer_id}' disconnected");
+    result
+}
+
+fn serve_peer(
+    ws: &mut WebSocket<TcpStream>,
+    peer_id: &str,
+    peers: &PeerRegistry,
+    outbox_rx: &std::sync::mpsc::Receiver<String>,
+) -> Result<()> {
     loop {
         if let Ok(msg) = outbox_rx.try_recv() {
             ws.send(Message::text(msg))?;
@@ -66,7 +81,7 @@ fn handle_peer(stream: TcpStream, peers: PeerRegistry) -> Result<()> {
         match ws.read() {
             Ok(Message::Text(t)) => {
                 let v: Value = serde_json::from_str(t.as_str())?;
-                handle_signal(&v, &peer_id, &peers)?;
+                handle_signal(&v, peer_id, peers)?;
             }
             Ok(Message::Close(_)) => break,
             Ok(_) => {}
@@ -75,9 +90,6 @@ fn handle_peer(stream: TcpStream, peers: PeerRegistry) -> Result<()> {
             Err(e) => return Err(e.into()),
         }
     }
-
-    peers.lock().unwrap().remove(&peer_id);
-    println!("Peer '{peer_id}' disconnected");
     Ok(())
 }
 

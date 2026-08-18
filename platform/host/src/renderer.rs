@@ -1,17 +1,23 @@
 use crate::avatar_state::{AvatarPose, AvatarState};
 use crate::host_state::HostState;
+use crate::input_state::InputState;
 use bevy::app::AppExit;
 use bevy::core::{FrameCount, TaskPoolPlugin, TypeRegistrationPlugin};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::core_pipeline::CorePipelinePlugin;
 use bevy::gltf::GltfAssetLabel;
+use bevy::input::keyboard::{KeyboardInput, KeyCode};
+use bevy::input::ButtonState;
 use bevy::log::LogPlugin;
 use bevy::pbr::{DirectionalLightBundle, PbrPlugin, StandardMaterial};
 use bevy::prelude::*;
 use bevy::render::pipelined_rendering::PipelinedRenderingPlugin;
 use bevy::render::RenderPlugin;
 use bevy::scene::ScenePlugin;
+use bevy::sprite::SpritePlugin;
+use bevy::text::{Text, TextStyle, TextPlugin};
 use bevy::transform::TransformPlugin;
+use bevy::ui::{node_bundles::TextBundle, PositionType, Style, UiPlugin, Val};
 use bevy::window::WindowPlugin;
 use bevy::winit::{UpdateMode, WakeUp, WinitPlugin, WinitSettings};
 use std::collections::HashMap;
@@ -24,6 +30,10 @@ pub const TARGET_FPS: u64 = 60;
 
 /// Frames to render before the integration test self-terminates.
 pub const TEST_FRAMES: u32 = 240;
+
+/// Configurable exit-after-N-frames limit for the game binary.
+#[derive(Resource)]
+pub struct TestFrameLimit(pub u32);
 
 /// Shared pose target bridging the Wasm guest and the Bevy scene graph.
 #[derive(Resource, Clone)]
@@ -44,6 +54,16 @@ pub struct RemoteAvatar;
 /// Peer id a remote avatar entity mirrors.
 #[derive(Component)]
 pub struct RemotePeerId(pub String);
+
+/// When true, `read_keyboard` ignores real keys and feeds scripted input so the
+/// whole stack (input -> guest -> pose -> network -> score) can be exercised
+/// headlessly (role A drives toward role B).
+#[derive(Resource)]
+pub struct AutoInput(pub bool);
+
+/// Marks the on-screen score text entity.
+#[derive(Component)]
+pub struct ScoreText;
 
 /// Holds the instantiated Wasm render module so a Bevy `Update` system can
 /// drive exactly one guest tick per rendered frame.
@@ -90,6 +110,9 @@ pub fn build_app(
         CorePipelinePlugin,
         PbrPlugin::default(),
         bevy::gltf::GltfPlugin::default(),
+        SpritePlugin,
+        TextPlugin,
+        UiPlugin,
     ));
     app.insert_resource(WinitSettings {
         focused_mode: UpdateMode::reactive(Duration::from_millis(1000 / TARGET_FPS)),
@@ -97,10 +120,19 @@ pub fn build_app(
     });
     app.insert_resource(AvatarStateHandle(avatar_state));
     app.insert_resource(RemoteAvatarsHandle(remote_avatars));
+    app.insert_resource(AutoInput(false));
     app.add_systems(Startup, setup_scene);
     app.add_systems(
         Update,
-        (wasm_render_tick, apply_avatar_pose, sync_remote_avatars, tint_remote_avatars).chain(),
+        (
+            read_keyboard,
+            wasm_render_tick,
+            apply_avatar_pose,
+            sync_remote_avatars,
+            tint_remote_avatars,
+            update_score_display,
+        )
+            .chain(),
     );
     app
 }
@@ -119,8 +151,58 @@ fn wasm_render_tick(runtime: Res<WasmRuntime>) {
     }
 }
 
-/// Drains the peer socket, validates 16-byte pose datagrams, and records the
-/// latest pose per remote peer (timestamped for stale-avatar cleanup).
+/// Polls real keyboard input each frame and writes it into the host's input
+/// buffer (which the guest reads through the `get_input_*` host functions).
+/// In auto mode, a scripted input drives role A toward role B instead.
+fn read_keyboard(
+    mut events: EventReader<KeyboardInput>,
+    runtime: Res<WasmRuntime>,
+    auto: Res<AutoInput>,
+) {
+    let mut input = InputState::default();
+    if auto.0 {
+        let store = runtime.store.lock().unwrap();
+        if store.data().movement_axis() == 0 {
+            input.move_left = 1;
+        }
+    } else {
+        for event in events.read() {
+            if event.state != ButtonState::Pressed {
+                continue;
+            }
+            match event.key_code {
+                KeyCode::KeyW => input.move_up = 1,
+                KeyCode::KeyS => input.move_down = 1,
+                KeyCode::KeyA => input.move_left = 1,
+                KeyCode::KeyD => input.move_right = 1,
+                KeyCode::Space => input.action_1 = 1,
+                KeyCode::ShiftLeft => input.action_2 = 1,
+                _ => {}
+            }
+        }
+    }
+    let mut store = runtime.store.lock().unwrap();
+    store.data_mut().set_input(input);
+}
+
+/// Updates the on-screen score text from the host's local tag score and the
+/// sum of every remote peer's score.
+fn update_score_display(runtime: Res<WasmRuntime>, mut query: Query<&mut Text, With<ScoreText>>) {
+    let Ok(mut text) = query.get_single_mut() else {
+        return;
+    };
+    let store = runtime.store.lock().unwrap();
+    let local = store.data().tag_score();
+    let remote_total: u32 = store.data().remote_scores().lock().unwrap().values().sum();
+    let label = format!("Local Score: {local} | Remote Score: {remote_total}");
+    if text.sections[0].value != label {
+        text.sections[0].value = label;
+    }
+}
+
+/// Drains the peer socket and dispatches datagrams: 16-byte payloads are
+/// validated avatar poses (timestamped for stale-avatar cleanup), 4-byte
+/// payloads are tag scores broadcast by the remote guest.
 fn poll_network(store: &mut wasmtime::Store<HostState>) {
     let incoming = match store.data().peer_connection() {
         Some(pc) => pc.poll_incoming_from(),
@@ -131,11 +213,10 @@ fn poll_network(store: &mut wasmtime::Store<HostState>) {
     }
     let remote = store.data().remote_avatars().clone();
     let mut map = remote.lock().unwrap();
+    let remote_scores = store.data().remote_scores().clone();
+    let mut scores = remote_scores.lock().unwrap();
     let now = Instant::now();
     for (addr, payload) in incoming {
-        if payload.len() != 16 {
-            continue;
-        }
         let peer_id = match store
             .data()
             .peer_connection()
@@ -144,14 +225,23 @@ fn poll_network(store: &mut wasmtime::Store<HostState>) {
             Some(id) => id,
             None => continue,
         };
-        let x = f32::from_le_bytes(payload[0..4].try_into().unwrap());
-        let y = f32::from_le_bytes(payload[4..8].try_into().unwrap());
-        let z = f32::from_le_bytes(payload[8..12].try_into().unwrap());
-        let rot_y = f32::from_le_bytes(payload[12..16].try_into().unwrap());
-        if !(x.is_finite() && y.is_finite() && z.is_finite() && rot_y.is_finite()) {
-            continue;
+        match payload.len() {
+            16 => {
+                let x = f32::from_le_bytes(payload[0..4].try_into().unwrap());
+                let y = f32::from_le_bytes(payload[4..8].try_into().unwrap());
+                let z = f32::from_le_bytes(payload[8..12].try_into().unwrap());
+                let rot_y = f32::from_le_bytes(payload[12..16].try_into().unwrap());
+                if !(x.is_finite() && y.is_finite() && z.is_finite() && rot_y.is_finite()) {
+                    continue;
+                }
+                map.insert(peer_id, AvatarPose { x, y, z, rot_y, last_seen: now });
+            }
+            4 => {
+                let score = u32::from_le_bytes(payload[0..4].try_into().unwrap());
+                scores.insert(peer_id, score);
+            }
+            _ => {}
         }
-        map.insert(peer_id, AvatarPose { x, y, z, rot_y, last_seen: now });
     }
 }
 
@@ -259,8 +349,12 @@ fn tint_remote_avatars(
 }
 
 /// Self-terminates the integration test once enough frames have rendered.
-fn terminate_after_frames(frames: Res<FrameCount>, mut exit: EventWriter<AppExit>) {
-    if frames.0 >= TEST_FRAMES {
+fn terminate_after_frames(
+    limit: Res<TestFrameLimit>,
+    frames: Res<FrameCount>,
+    mut exit: EventWriter<AppExit>,
+) {
+    if frames.0 >= limit.0 {
         exit.send(AppExit::Success);
     }
 }
@@ -299,9 +393,33 @@ fn setup_scene(
         scene: avatar,
         ..default()
     }, Avatar));
+
+    commands.spawn((
+        TextBundle::from_section(
+            "Local Score: 0 | Remote Score: 0",
+            TextStyle {
+                font_size: 24.0,
+                color: Color::srgb_u8(240, 240, 240),
+                ..default()
+            },
+        )
+        .with_style(Style {
+            position_type: PositionType::Absolute,
+            left: Val::Px(10.0),
+            top: Val::Px(10.0),
+            ..default()
+        }),
+        ScoreText,
+    ));
 }
 
-/// Registers the frame-limit terminator used by the integration test.
+/// Registers the frame-limit terminator used by the integration tests.
 pub fn add_test_terminator(app: &mut App) {
+    add_exit_after(app, TEST_FRAMES);
+}
+
+/// Registers a terminator that exits the app after `frames` rendered frames.
+pub fn add_exit_after(app: &mut App, frames: u32) {
+    app.insert_resource(TestFrameLimit(frames));
     app.add_systems(Update, terminate_after_frames);
 }

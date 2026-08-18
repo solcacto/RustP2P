@@ -20,8 +20,12 @@ pub struct HostState {
     avatar_state: Option<Arc<Mutex<AvatarState>>>,
     /// Latest pose of every remote peer's avatar, shared with the renderer.
     remote_avatars: Arc<Mutex<HashMap<String, AvatarPose>>>,
+    /// Latest tag score of every remote peer, shared with the renderer.
+    remote_scores: Arc<Mutex<HashMap<String, u32>>>,
     /// Local movement axis: 0 = X (role A), 1 = Z (role B).
     movement_axis: u8,
+    /// Local tag score reported by the guest through `set_tag_score`.
+    tag_score: u32,
 }
 
 impl HostState {
@@ -41,7 +45,9 @@ impl HostState {
             incoming_messages: VecDeque::new(),
             avatar_state: None,
             remote_avatars: Arc::new(Mutex::new(HashMap::new())),
+            remote_scores: Arc::new(Mutex::new(HashMap::new())),
             movement_axis: 0,
+            tag_score: 0,
         }
     }
 
@@ -142,5 +148,21 @@ impl HostState {
 
     pub fn movement_axis(&self) -> u8 {
         self.movement_axis
+    }
+
+    pub fn set_tag_score(&mut self, score: u32) {
+        self.tag_score = score;
+    }
+
+    pub fn tag_score(&self) -> u32 {
+        self.tag_score
+    }
+
+    pub fn set_remote_scores(&mut self, map: Arc<Mutex<HashMap<String, u32>>>) {
+        self.remote_scores = map;
+    }
+
+    pub fn remote_scores(&self) -> &Arc<Mutex<HashMap<String, u32>>> {
+        &self.remote_scores
     }
 }

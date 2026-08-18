@@ -243,5 +243,25 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<()> {
         },
     )?;
 
+    linker.func_wrap(
+        "env",
+        "set_tag_score",
+        |mut caller: Caller<'_, HostState>, score: u32| -> Result<()> {
+            caller.data_mut().set_tag_score(score);
+            Ok(())
+        },
+    )?;
+
+    linker.func_wrap(
+        "env",
+        "broadcast_tag_score",
+        |caller: Caller<'_, HostState>, score: u32| -> Result<()> {
+            if let Some(pc) = caller.data().peer_connection() {
+                pc.send_to_all(&score.to_le_bytes())?;
+            }
+            Ok(())
+        },
+    )?;
+
     Ok(())
 }

@@ -5,3 +5,12 @@ members = ["platform/host", "platform/guest", "platform/signaling_server"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+panic = "abort"

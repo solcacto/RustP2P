@@ -13,7 +13,10 @@ bevy = { version = "0.14", default-features = false, features = [
     "bevy_gltf",
     "bevy_asset",
     "bevy_scene",
+    "bevy_ui",
+    "bevy_text",
     "multi_threaded",
+    "default_font",
 ] }
 gltf = "1.4"
 serde_json = "1"
