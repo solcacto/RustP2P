@@ -1,3 +1,4 @@
+use crate::input_state::InputState;
 use std::time::Instant;
 
 pub struct HostState {
@@ -6,6 +7,8 @@ pub struct HostState {
     frame_count: u64,
     last_frame_time: Instant,
     delta_time: f64,
+    input_state: InputState,
+    previous_input_state: InputState,
 }
 
 impl HostState {
@@ -16,6 +19,8 @@ impl HostState {
             frame_count: 0,
             last_frame_time: Instant::now(),
             delta_time: 0.0,
+            input_state: InputState::default(),
+            previous_input_state: InputState::default(),
         }
     }
 
@@ -46,5 +51,19 @@ impl HostState {
 
     pub fn delta_time(&self) -> f64 {
         self.delta_time
+    }
+
+    /// Sets the current frame's input, rotating the previous frame's input.
+    pub fn set_input(&mut self, input: InputState) {
+        self.previous_input_state = self.input_state;
+        self.input_state = input;
+    }
+
+    pub fn input(&self) -> &InputState {
+        &self.input_state
+    }
+
+    pub fn previous_input(&self) -> &InputState {
+        &self.previous_input_state
     }
 }

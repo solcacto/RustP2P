@@ -27,5 +27,69 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<()> {
         },
     )?;
 
+    linker.func_wrap(
+        "env",
+        "get_input_move_up",
+        |caller: Caller<'_, HostState>| -> Result<u32> {
+            Ok(caller.data().input().move_up as u32)
+        },
+    )?;
+    linker.func_wrap(
+        "env",
+        "get_input_move_down",
+        |caller: Caller<'_, HostState>| -> Result<u32> {
+            Ok(caller.data().input().move_down as u32)
+        },
+    )?;
+    linker.func_wrap(
+        "env",
+        "get_input_move_left",
+        |caller: Caller<'_, HostState>| -> Result<u32> {
+            Ok(caller.data().input().move_left as u32)
+        },
+    )?;
+    linker.func_wrap(
+        "env",
+        "get_input_move_right",
+        |caller: Caller<'_, HostState>| -> Result<u32> {
+            Ok(caller.data().input().move_right as u32)
+        },
+    )?;
+    linker.func_wrap(
+        "env",
+        "get_input_action_1",
+        |caller: Caller<'_, HostState>| -> Result<u32> {
+            Ok(caller.data().input().action_1 as u32)
+        },
+    )?;
+    linker.func_wrap(
+        "env",
+        "get_input_action_2",
+        |caller: Caller<'_, HostState>| -> Result<u32> {
+            Ok(caller.data().input().action_2 as u32)
+        },
+    )?;
+    linker.func_wrap(
+        "env",
+        "get_input_gamepad_connected",
+        |caller: Caller<'_, HostState>| -> Result<u32> {
+            Ok(caller.data().input().gamepad_connected as u32)
+        },
+    )?;
+    linker.func_wrap(
+        "env",
+        "get_input_gamepad_axis_x",
+        |caller: Caller<'_, HostState>| -> Result<f32> {
+            Ok(caller.data().input().gamepad_axis_x)
+        },
+    )?;
+    linker.func_wrap(
+        "env",
+        "get_input_gamepad_axis_y",
+        |caller: Caller<'_, HostState>| -> Result<f32> {
+            Ok(caller.data().input().gamepad_axis_y)
+        },
+    )?;
+
     Ok(())
 }
