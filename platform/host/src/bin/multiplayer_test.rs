@@ -70,6 +70,13 @@ fn main() -> Result<()> {
         bail!("renderer exited with an error: {exit:?}");
     }
 
+    // Graceful shutdown: close the signaling WebSocket before the process exits.
+    let mut guard = store_handle.lock().unwrap();
+    if let Some(pc) = guard.data_mut().peer_connection_mut() {
+        let _ = pc.shutdown();
+    }
+    drop(guard);
+
     // The renderer self-terminates after a few seconds of rendering.
     let rendered = store_handle.lock().unwrap().data().frame_count();
     println!("[{role}] rendered {rendered} frames");

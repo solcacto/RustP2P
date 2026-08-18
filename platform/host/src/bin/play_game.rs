@@ -105,6 +105,17 @@ fn main() -> Result<()> {
         bail!("renderer exited with an error: {exit:?}");
     }
 
+    // Graceful shutdown: close the signaling WebSocket and UDP socket before
+    // the process exits so the server observes a clean disconnect.
+    let mut guard = store_handle.lock().unwrap();
+    if let Some(pc) = guard.data_mut().peer_connection_mut() {
+        match pc.shutdown() {
+            Ok(_) => println!("[{role}] signaling connection closed cleanly"),
+            Err(e) => println!("[{role}] warning: signaling shutdown: {e}"),
+        }
+    }
+    drop(guard);
+
     // Post-run verification.
     let rendered = store_handle.lock().unwrap().data().frame_count();
     println!("[{role}] rendered {rendered} frames");

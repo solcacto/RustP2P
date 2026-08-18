@@ -10,7 +10,7 @@
 //! buffer before the guest tick runs.
 
 use crate::avatar_state::{AvatarPose, AvatarState};
-use crate::host_state::HostState;
+use crate::host_state::{HostState, SignalingStatus};
 use crate::input_state::InputState;
 use bevy::app::AppExit;
 use bevy::core::{FrameCount, TaskPoolPlugin, TypeRegistrationPlugin};
@@ -158,7 +158,9 @@ pub fn build_app(
             apply_avatar_pose,
             sync_remote_avatars,
             tint_remote_avatars,
-            update_score_display,
+            monitor_signaling,
+            update_hud,
+            exit_after_wasm_error,
         )
             .chain(),
     );
@@ -169,14 +171,131 @@ pub fn build_app(
 /// remote avatar poses that arrived are registered in the shared map, then the
 /// guest computes a new pose and pushes it through `update_avatar_transform`
 /// into the shared handle.
+///
+/// A guest trap is a recoverable condition: it is recorded in host state (and
+/// shown in the HUD), the guest is no longer called, and the app exits
+/// gracefully — the host itself never crashes.
 fn wasm_render_tick(runtime: Res<WasmRuntime>) {
     let mut guard = runtime.store.lock().unwrap();
-    let store = &mut *guard;
-    store.data_mut().update_frame();
-    poll_network(store);
-    if let Err(err) = runtime.render_tick.call(store, ()) {
-        panic!("wasm render_tick failed: {err}");
+    {
+        let store = &mut *guard;
+        store.data_mut().update_frame();
+        poll_network(store);
     }
+    let trapped = {
+        let store = &mut *guard;
+        if store.data().wasm_error().is_some() {
+            None
+        } else {
+            let frame = store.data().frame_count();
+            match runtime.render_tick.call(store, ()) {
+                Ok(()) => None,
+                Err(err) => Some((format!("{err:#}"), frame)),
+            }
+        }
+    };
+    if let Some((error, frame)) = trapped {
+        guard.data_mut().set_wasm_error(error.clone(), frame);
+        eprintln!("wasm guest trapped: {error}");
+    }
+}
+
+/// Monitors the signaling-server link and reconnects with exponential backoff.
+///
+/// While connected it probes the WebSocket every `PROBE_EVERY_FRAMES` frames.
+/// On a lost link it switches to [`SignalingStatus::Reconnecting`], waits out
+/// the current backoff delay, then attempts a reconnect (keeping the UDP
+/// socket so the P2P address and peer map survive). Once the server is back it
+/// transitions back to connected.
+fn monitor_signaling(runtime: Res<WasmRuntime>) {
+    const PROBE_EVERY_FRAMES: u64 = 180;
+    const BACKOFF_BASE_MS: u64 = 500;
+    const BACKOFF_MAX_MS: u64 = 30_000;
+
+    let mut guard = runtime.store.lock().unwrap();
+    let store = &mut *guard;
+    let frame = store.data().frame_count();
+    let due = store
+        .data()
+        .last_signaling_probe()
+        .is_none_or(|f| frame.saturating_sub(f) >= PROBE_EVERY_FRAMES);
+    if !due {
+        return;
+    }
+    store.data_mut().set_last_signaling_probe(Some(frame));
+    if store.data().peer_connection().is_none() {
+        return;
+    }
+
+    let status = store.data().signaling_status().clone();
+    let now = Instant::now();
+    match status {
+        SignalingStatus::Connected => {
+            let probe = {
+                store
+                    .data_mut()
+                    .peer_connection_mut()
+                    .expect("peer connection is set")
+                    .probe_signaling()
+            };
+            if let Err(e) = probe {
+                let delay = backoff(BACKOFF_BASE_MS, BACKOFF_MAX_MS, 1);
+                store.data_mut().set_signaling_status(SignalingStatus::Reconnecting { attempt: 1 });
+                store.data_mut().set_signaling_next_retry(Some(now + delay));
+                eprintln!("signaling link lost: {e}; reconnect in {delay:?}");
+            }
+        }
+        SignalingStatus::Reconnecting { attempt } => {
+            let retry_at = store.data().signaling_next_retry().unwrap_or(now);
+            if now < retry_at {
+                return;
+            }
+            let result = {
+                store
+                    .data_mut()
+                    .peer_connection_mut()
+                    .expect("peer connection is set")
+                    .reconnect()
+            };
+            match result {
+                Ok(_) => {
+                    store.data_mut().set_signaling_status(SignalingStatus::Connected);
+                    store.data_mut().set_signaling_next_retry(None);
+                    eprintln!("signaling link reconnected");
+                }
+                Err(e) => {
+                    let next = attempt + 1;
+                    let delay = backoff(BACKOFF_BASE_MS, BACKOFF_MAX_MS, next);
+                    store
+                        .data_mut()
+                        .set_signaling_status(SignalingStatus::Reconnecting { attempt: next });
+                    store.data_mut().set_signaling_next_retry(Some(now + delay));
+                    eprintln!("signaling reconnect failed (attempt {next}): {e}; retry in {delay:?}");
+                }
+            }
+        }
+        SignalingStatus::Down => {
+            // Only reachable if something set the status directly; treat like
+            // a reconnect that is due immediately.
+            let result = {
+                store
+                    .data_mut()
+                    .peer_connection_mut()
+                    .expect("peer connection is set")
+                    .reconnect()
+            };
+            if result.is_ok() {
+                store.data_mut().set_signaling_status(SignalingStatus::Connected);
+                store.data_mut().set_signaling_next_retry(None);
+            }
+        }
+    }
+}
+
+/// Exponential backoff with a ceiling: `base * 2^(attempt-1)`, capped at `max`.
+fn backoff(base_ms: u64, max_ms: u64, attempt: u32) -> Duration {
+    let shift = (attempt.saturating_sub(1)).min(31);
+    Duration::from_millis((base_ms.saturating_mul(1u64 << shift)).min(max_ms))
 }
 
 /// Polls real keyboard input each frame and writes it into the host's input
@@ -213,18 +332,67 @@ fn read_keyboard(
     store.data_mut().set_input(input);
 }
 
-/// Updates the on-screen score text from the host's local tag score and the
-/// sum of every remote peer's score.
-fn update_score_display(runtime: Res<WasmRuntime>, mut query: Query<&mut Text, With<ScoreText>>) {
+/// Builds and updates the score/status HUD from host state: scores, peer
+/// connectivity, signaling status, and any Wasm error. The text is logged
+/// whenever it changes so lifecycle transitions are visible in stdout too.
+fn update_hud(runtime: Res<WasmRuntime>, mut query: Query<&mut Text, With<ScoreText>>) {
     let Ok(mut text) = query.get_single_mut() else {
         return;
     };
     let store = runtime.store.lock().unwrap();
+
     let local = store.data().tag_score();
     let remote_total: u32 = store.data().remote_scores().lock().unwrap().values().sum();
-    let label = format!("Local Score: {local} | Remote Score: {remote_total}");
+    let has_peer = store.data().peer_connection().is_some();
+
+    let (peer_line, sig_line) = if has_peer {
+        let now = Instant::now();
+        let map = store.data().remote_avatars().lock().unwrap();
+        let any_fresh = map
+            .values()
+            .any(|pose| now.duration_since(pose.last_seen).as_secs_f32() < 2.0);
+        let ever_seen = !map.is_empty();
+        let peer_line = if any_fresh {
+            "Peer: connected".to_string()
+        } else if ever_seen {
+            "Peer: DISCONNECTED (avatar removed)".to_string()
+        } else {
+            "Peer: waiting for remote...".to_string()
+        };
+        let sig_line = format!("Signaling: {}", store.data().signaling_status().as_str());
+        (peer_line, sig_line)
+    } else {
+        ("Peer: n/a".to_string(), "Signaling: n/a".to_string())
+    };
+
+    let wasm_line = match store.data().wasm_error() {
+        Some(err) => format!("Wasm error: {err}"),
+        None => "Wasm: running".to_string(),
+    };
+
+    let label = format!(
+        "Local Score: {local} | Remote Score: {remote_total}\n{peer_line}\n{sig_line}\n{wasm_line}"
+    );
     if text.sections[0].value != label {
+        println!("[hud] {label}");
         text.sections[0].value = label;
+    }
+}
+
+/// Exits cleanly (exit code 0) shortly after a Wasm guest trap, so the error
+/// is visible before the process shuts down without crashing.
+fn exit_after_wasm_error(
+    runtime: Res<WasmRuntime>,
+    frames: Res<FrameCount>,
+    mut exit: EventWriter<AppExit>,
+) {
+    const GRACE_FRAMES: u32 = 90;
+    let store = runtime.store.lock().unwrap();
+    let Some(err_frame) = store.data().wasm_error_frame() else {
+        return;
+    };
+    if frames.0 as u64 >= err_frame + u64::from(GRACE_FRAMES) {
+        exit.send(AppExit::Success);
     }
 }
 

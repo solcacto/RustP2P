@@ -11,6 +11,41 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+/// Connectivity state of the signaling server link, surfaced in the HUD.
+///
+/// Defaults to [`SignalingStatus::Connected`]: the link was established
+/// successfully at startup, so the health monitor starts optimistic and
+/// corrects the status if a probe fails.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SignalingStatus {
+    /// The WebSocket to the signaling server is healthy.
+    #[default]
+    Connected,
+    /// A reconnect is in progress; `attempt` counts retries so far.
+    Reconnecting { attempt: u32 },
+    /// The link is known to be unavailable.
+    Down,
+}
+
+impl SignalingStatus {
+    /// Human-readable label for HUD/log output.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Connected => "connected",
+            Self::Reconnecting { .. } => "reconnecting",
+            Self::Down => "down",
+        }
+    }
+
+    /// Returns the current retry attempt number (`0` when connected/down).
+    pub fn attempt(&self) -> u32 {
+        match self {
+            Self::Reconnecting { attempt } => *attempt,
+            _ => 0,
+        }
+    }
+}
+
 /// All state the host keeps for a single Wasm instance.
 ///
 /// This is the only handle a guest has to the host's world: host functions
@@ -38,6 +73,17 @@ pub struct HostState {
     movement_axis: u8,
     /// Local tag score reported by the guest through `set_tag_score`.
     tag_score: u32,
+    /// Latest Wasm guest error (trap), if any. Set instead of crashing.
+    wasm_error: Option<String>,
+    /// Frame at which `wasm_error` was set; used to exit gracefully after a
+    /// grace period.
+    wasm_error_frame: Option<u64>,
+    /// Signaling server link health, updated by the health monitor.
+    signaling_status: SignalingStatus,
+    /// Last frame the signaling link was probed.
+    last_signaling_probe: Option<u64>,
+    /// Earliest `Instant` a reconnect may be attempted (exponential backoff).
+    signaling_next_retry: Option<Instant>,
 }
 
 impl HostState {
@@ -64,6 +110,11 @@ impl HostState {
             remote_scores: Arc::new(Mutex::new(HashMap::new())),
             movement_axis: 0,
             tag_score: 0,
+            wasm_error: None,
+            wasm_error_frame: None,
+            signaling_status: SignalingStatus::default(),
+            last_signaling_probe: None,
+            signaling_next_retry: None,
         }
     }
 
@@ -212,5 +263,55 @@ impl HostState {
     /// Returns the shared map of the latest tag score of every remote peer.
     pub fn remote_scores(&self) -> &Arc<Mutex<HashMap<String, u32>>> {
         &self.remote_scores
+    }
+
+    /// Records a Wasm guest trap, along with the frame it happened on.
+    ///
+    /// The host treats this as a recoverable condition: it stops calling the
+    /// guest, surfaces the error in the HUD, and exits gracefully after a
+    /// grace period instead of crashing.
+    pub fn set_wasm_error(&mut self, error: String, frame: u64) {
+        self.wasm_error = Some(error);
+        self.wasm_error_frame = Some(frame);
+    }
+
+    /// Returns the latest Wasm guest error, if the guest has trapped.
+    pub fn wasm_error(&self) -> Option<&str> {
+        self.wasm_error.as_deref()
+    }
+
+    /// Returns the frame on which the guest trapped, if it did.
+    pub fn wasm_error_frame(&self) -> Option<u64> {
+        self.wasm_error_frame
+    }
+
+    /// Replaces the signaling link health status.
+    pub fn set_signaling_status(&mut self, status: SignalingStatus) {
+        self.signaling_status = status;
+    }
+
+    /// Returns the signaling link health status.
+    pub fn signaling_status(&self) -> &SignalingStatus {
+        &self.signaling_status
+    }
+
+    /// Records the last frame the signaling link was probed.
+    pub fn set_last_signaling_probe(&mut self, frame: Option<u64>) {
+        self.last_signaling_probe = frame;
+    }
+
+    /// Returns the last frame the signaling link was probed.
+    pub fn last_signaling_probe(&self) -> Option<u64> {
+        self.last_signaling_probe
+    }
+
+    /// Sets the earliest time a reconnect may be attempted.
+    pub fn set_signaling_next_retry(&mut self, when: Option<Instant>) {
+        self.signaling_next_retry = when;
+    }
+
+    /// Returns the earliest time a reconnect may be attempted.
+    pub fn signaling_next_retry(&self) -> Option<Instant> {
+        self.signaling_next_retry
     }
 }

@@ -189,6 +189,7 @@ cargo run -p host --bin game_loop                   # frame loop
 cargo run -p host --bin input_test                  # input getters
 cargo run -p host --bin network_wasm_test           # wasm<->wasm messages
 cargo run -p host --bin manifest_test               # manifest validation + hash gate
+cargo run -p host --bin trap_test                   # graceful handling of wasm traps
 cargo run -p host --bin render_test                 # 3D scene + wasm-driven pose
 cargo run -p host --bin multiplayer_test -- --role A   # needs 2 terminals
 cargo run -p host --bin multiplayer_test -- --role B
@@ -197,6 +198,21 @@ cargo run -p host --bin multiplayer_test -- --role B
 cargo run -p signaling_server &   # in another terminal
 cargo run -p host --bin network_test
 ```
+
+## Lifecycle & error handling
+
+The runtime handles failure without crashing:
+
+- **Wasm traps** — a trapping guest is recorded, shown in the HUD, and no longer
+  called; the app exits cleanly (code 0) after a short grace period
+  (`trap_test` verifies this).
+- **Peer disconnects** — when a remote stops sending poses for ~2s its avatar
+  is despawned and the HUD shows `Peer: DISCONNECTED (avatar removed)`.
+- **Signaling server outages** — the host probes the WebSocket link, reconnects
+  with exponential backoff (0.5s → 30s) keeping the P2P UDP socket alive, and
+  logs/HUDs the status (`signaling link lost` → `reconnected`).
+- **Graceful shutdown** — on exit the signaling WebSocket sends a close frame
+  and flushes before the process drops the app and exits 0.
 
 Lint and docs:
 

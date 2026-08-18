@@ -17,6 +17,7 @@ use tungstenite::{client as ws_client, Message, WebSocket};
 /// traffic plus a WebSocket to the signaling server for address discovery.
 pub struct PeerConnection {
     peer_id: String,
+    signal_addr: String,
     udp: UdpSocket,
     ws: WebSocket<TcpStream>,
     peers: HashMap<String, SocketAddr>,
@@ -30,30 +31,73 @@ impl PeerConnection {
     /// `"127.0.0.1:0"` to let the OS pick a free port.
     pub fn new(peer_id: impl Into<String>, signal_addr: &str, udp_bind: &str) -> Result<Self> {
         let peer_id = peer_id.into();
-
         let udp = UdpSocket::bind(udp_bind)?;
         udp.set_nonblocking(true)?;
-        let local_addr = udp.local_addr()?;
-
-        let tcp = TcpStream::connect(signal_addr).with_context(|| {
-            format!("signaling server at {signal_addr} not reachable (is it running?)")
-        })?;
-        tcp.set_read_timeout(Some(Duration::from_millis(200)))?;
-        let url = format!("ws://{signal_addr}/");
-        let (ws, _) = ws_client(url, tcp).context("signaling handshake failed")?;
 
         let mut pc = Self {
             peer_id,
+            signal_addr: signal_addr.to_string(),
             udp,
-            ws,
+            ws: Self::open_ws(signal_addr)?,
             peers: HashMap::new(),
         };
-        pc.send_signal(&json!({
-            "type": "register",
-            "peer_id": pc.peer_id,
-            "address": local_addr.to_string(),
-        }))?;
+        pc.register()?;
         Ok(pc)
+    }
+
+    /// Establishes a fresh WebSocket connection to the signaling server.
+    fn open_ws(signal_addr: &str) -> Result<WebSocket<TcpStream>> {
+        let tcp = TcpStream::connect(signal_addr).with_context(|| {
+            format!("signaling server at {signal_addr} not reachable (is it running?)")
+        })?;
+        tcp.set_read_timeout(Some(Duration::from_millis(100)))?;
+        let url = format!("ws://{signal_addr}/");
+        let (ws, _) = ws_client(url, tcp).context("signaling handshake failed")?;
+        Ok(ws)
+    }
+
+    /// Sends this peer's `register` message to the signaling server.
+    fn register(&mut self) -> Result<()> {
+        let local_addr = self.udp.local_addr()?;
+        self.send_signal(&json!({
+            "type": "register",
+            "peer_id": self.peer_id,
+            "address": local_addr.to_string(),
+        }))
+    }
+
+    /// Re-establishes the signaling WebSocket after the link went down, keeping
+    /// the UDP socket (and therefore our P2P address and peer map) intact.
+    pub fn reconnect(&mut self) -> Result<()> {
+        self.ws = Self::open_ws(&self.signal_addr)?;
+        self.register()
+    }
+
+    /// Probes the signaling link for liveness.
+    ///
+    /// Reads one pending message: a clean `Close` or any I/O error means the
+    /// link is dead; a timeout (nothing pending) means it is healthy. Stale
+    /// messages the server had queued are discarded — the link is what matters.
+    pub fn probe_signaling(&mut self) -> Result<()> {
+        match self.ws.read() {
+            Ok(Message::Close(_)) => bail!("signaling server closed the connection"),
+            Ok(_) => Ok(()),
+            Err(tungstenite::Error::Io(e))
+                if e.kind() == io::ErrorKind::TimedOut
+                    || e.kind() == io::ErrorKind::WouldBlock =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Gracefully closes the signaling WebSocket. Dropping this connection
+    /// afterwards closes the underlying TCP socket and UDP socket.
+    pub fn shutdown(&mut self) -> Result<()> {
+        self.ws.close(None)?;
+        self.ws.flush()?;
+        Ok(())
     }
 
     /// Returns this node's registered peer id.
