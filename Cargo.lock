@@ -2241,6 +2241,7 @@ dependencies = [
  "bevy",
  "gltf",
  "hex",
+ "image",
  "serde",
  "serde_json",
  "sha2",

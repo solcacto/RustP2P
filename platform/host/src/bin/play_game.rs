@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use host::{
     avatar_state::{AvatarPose, AvatarState},
+    avatar_standard,
     host_functions,
     host_state::HostState,
     manifest::GameManifest,
@@ -17,6 +18,7 @@ const SIGNAL_SERVER: &str = "127.0.0.1:9001";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const GAME_PACKAGE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../guest");
 const MANIFEST_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../guest/game_manifest.json");
+const AVATAR_ASSET: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/avatar_standard.glb");
 
 /// Commit 12: loads a game *package* — a `game_manifest.json` plus its Wasm —
 /// validates the manifest, refuses to load if the pinned SHA-256 doesn't match,
@@ -67,6 +69,18 @@ fn main() -> Result<()> {
     })?;
     manifest.verify_wasm(&manifest.wasm_entry, &wasm_bytes)?;
     let wasm_size = wasm_bytes.len();
+
+    // The standardized avatar is validated before rendering starts; a
+    // non-conforming avatar refuses to load.
+    let avatar_report = avatar_standard::validate_avatar_path(AVATAR_ASSET)?;
+    println!(
+        "[{role}] avatar OK: {} bones, {} triangles, {} textures, {} animations",
+        avatar_report.bone_count,
+        avatar_report.triangle_count,
+        avatar_report.texture_count,
+        avatar_report.animations.len()
+    );
+
     let engine = Engine::default();
     let mut linker = Linker::new(&engine);
     host_functions::register(&mut linker)?;

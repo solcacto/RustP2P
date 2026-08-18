@@ -65,6 +65,6 @@ fn main() -> Result<()> {
         bail!("avatar never moved: wasm render_tick did not drive the scene");
     }
 
-    println!("✓ 3D scene rendered: avatar loaded from avatar.glb and animated by Wasm logic");
+    println!("✓ 3D scene rendered: standard avatar loaded and animated by Wasm logic");
     Ok(())
 }

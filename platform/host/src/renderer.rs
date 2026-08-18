@@ -584,7 +584,7 @@ fn setup_scene(
         ..default()
     });
 
-    let avatar = asset_server.load(GltfAssetLabel::Scene(0).from_asset("avatar.glb"));
+    let avatar = asset_server.load(GltfAssetLabel::Scene(0).from_asset("avatar_standard.glb"));
     commands.spawn((SceneBundle {
         scene: avatar,
         ..default()

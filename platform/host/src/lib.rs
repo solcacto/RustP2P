@@ -23,6 +23,7 @@
 //! same directory. See the repository `README.md` for build and run
 //! instructions.
 
+pub mod avatar_standard;
 pub mod avatar_state;
 pub mod host_functions;
 pub mod host_state;

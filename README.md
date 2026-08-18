@@ -71,15 +71,17 @@ Key properties:
 │   │       ├── lib.rs
 │   │       ├── host_functions.rs   # All sandbox escape hatches (env module)
 │   │       ├── host_state.rs       # Per-instance host state
+│   │       ├── avatar_standard.rs  # Avatar-standard validator
 │   │       ├── manifest.rs         # Game manifest validation + hash verify
 │   │       ├── peer_connection.rs  # UDP + WebSocket signaling
 │   │       ├── renderer.rs         # Bevy scene, game loop, keyboard, HUD
 │   │       ├── avatar_state.rs / input_state.rs / input_poller.rs
-│   │       ├── assets/avatar.glb   # The avatar model
-│   │       ├── src/bin/            # play_game + framework tests
+│   │       ├── assets/avatar_standard.glb  # The standardized reference avatar
+│   │       ├── src/bin/            # play_game + framework tests/tools
 │   │       └── src/test_modules/   # WAT test guests (security/network/render)
 │   └── signaling_server/      # WebSocket discovery server
 ├── docs/
+│   ├── AVATAR_STANDARD.md     # The Universal Avatar standard
 │   ├── GAME_MANIFEST.md       # game_manifest.json format + validation
 │   ├── HOST_FUNCTIONS.md      # Host function reference
 │   └── SECURITY.md            # Full threat model
@@ -189,6 +191,7 @@ cargo run -p host --bin game_loop                   # frame loop
 cargo run -p host --bin input_test                  # input getters
 cargo run -p host --bin network_wasm_test           # wasm<->wasm messages
 cargo run -p host --bin manifest_test               # manifest validation + hash gate
+cargo run -p host --bin avatar_standard_test        # avatar-standard validation
 cargo run -p host --bin trap_test                   # graceful handling of wasm traps
 cargo run -p host --bin render_test                 # 3D scene + wasm-driven pose
 cargo run -p host --bin multiplayer_test -- --role A   # needs 2 terminals
@@ -225,6 +228,9 @@ cargo doc --workspace --no-deps
 
 ## Documentation
 
+- [`docs/AVATAR_STANDARD.md`](docs/AVATAR_STANDARD.md) — the Universal Avatar
+  standard (52-bone skeleton, attachment points, budgets, animations) and its
+  host-side validator.
 - [`docs/GAME_MANIFEST.md`](docs/GAME_MANIFEST.md) — the `game_manifest.json`
   format, validation rules, and authoring workflow.
 - [`docs/HOST_FUNCTIONS.md`](docs/HOST_FUNCTIONS.md) — every host function:
