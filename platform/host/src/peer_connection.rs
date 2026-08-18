@@ -18,7 +18,7 @@ impl PeerConnection {
         let peer_id = peer_id.into();
 
         let udp = UdpSocket::bind(udp_bind)?;
-        udp.set_read_timeout(Some(Duration::from_millis(200)))?;
+        udp.set_nonblocking(true)?;
         let local_addr = udp.local_addr()?;
 
         let tcp = TcpStream::connect(signal_addr).with_context(|| {
@@ -124,6 +124,16 @@ impl PeerConnection {
             }
             Err(_) => None,
         }
+    }
+
+    /// Drains all currently pending UDP datagrams from the socket.
+    pub fn poll_incoming(&self) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut buf = [0u8; 65536];
+        while let Ok((len, _)) = self.udp.recv_from(&mut buf) {
+            out.push(buf[..len].to_vec());
+        }
+        out
     }
 
     fn send_signal(&mut self, v: &Value) -> Result<()> {

@@ -94,58 +94,71 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<()> {
 
     linker.func_wrap(
         "env",
-        "send_message",
-        |mut caller: Caller<'_, HostState>, peer_idx: i32, message_ptr: i32, message_len: i32| {
-            if message_len <= 0 {
-                return Ok(());
+        "send_network_message",
+        |mut caller: Caller<'_, HostState>,
+         peer_id_ptr: i32,
+         peer_id_len: i32,
+         msg_ptr: i32,
+         msg_len: i32| -> Result<i32> {
+            if peer_id_ptr < 0 || peer_id_len < 0 || msg_ptr < 0 || msg_len < 0 {
+                return Ok(0);
             }
             let mem = caller
                 .get_export("memory")
                 .and_then(|e| e.into_memory())
                 .ok_or_else(|| anyhow!("guest has no memory export"))?;
-            let mut buf = vec![0u8; message_len as usize];
-            mem.read(&caller, message_ptr as usize, &mut buf)?;
+            let mem_size = mem.data_size(&caller);
+            let peer_end = peer_id_ptr as usize + peer_id_len as usize;
+            let msg_end = msg_ptr as usize + msg_len as usize;
+            if peer_end > mem_size || msg_end > mem_size {
+                return Ok(0);
+            }
 
-            let addr = {
-                let state = caller.data();
-                let pc = state
-                    .peer_connection()
-                    .ok_or_else(|| anyhow!("no peer connection"))?;
-                let key = state
-                    .connected_peers()
-                    .get(peer_idx as usize)
-                    .ok_or_else(|| anyhow!("unknown peer index {peer_idx}"))?;
-                *pc.peer_addr(key).ok_or_else(|| anyhow!("no address known for '{key}'"))?
+            let peer_id = String::from_utf8_lossy(
+                &mem.data(&caller)[peer_id_ptr as usize..peer_end],
+            )
+            .to_string();
+            let msg = mem.data(&caller)[msg_ptr as usize..msg_end].to_vec();
+
+            let Some(addr) = ({
+                let pc = caller.data().peer_connection().ok_or_else(|| anyhow!("no peer connection"))?;
+                pc.peer_addr(&peer_id).copied()
+            }) else {
+                return Ok(0);
             };
 
             let pc = caller
                 .data()
                 .peer_connection()
                 .ok_or_else(|| anyhow!("no peer connection"))?;
-            pc.send_udp(addr, &buf)?;
-            Ok(())
+            match pc.send_udp(addr, &msg) {
+                Ok(_) => Ok(1),
+                Err(_) => Ok(0),
+            }
         },
     )?;
 
     linker.func_wrap(
         "env",
-        "receive_message",
-        |mut caller: Caller<'_, HostState>| -> Result<i32> {
-            let mut buf = [0u8; 1024];
-            let received = caller
-                .data()
-                .peer_connection()
-                .ok_or_else(|| anyhow!("no peer connection"))?
-                .try_recv_udp(&mut buf);
-            let Some((len, _from)) = received else {
-                return Ok(0);
+        "receive_network_message",
+        |mut caller: Caller<'_, HostState>, buffer_ptr: i32, buffer_len: i32| -> Result<i32> {
+            let msg = match caller.data_mut().incoming_messages_mut().pop_front() {
+                Some(m) => m,
+                None => return Ok(0),
             };
+            if buffer_ptr < 0 || buffer_len < 0 {
+                return Ok(-1);
+            }
             let mem = caller
                 .get_export("memory")
                 .and_then(|e| e.into_memory())
                 .ok_or_else(|| anyhow!("guest has no memory export"))?;
-            mem.write(&mut caller, 0, &buf[..len])?;
-            Ok(len as i32)
+            let mem_size = mem.data_size(&caller);
+            if buffer_ptr as usize + msg.len() > mem_size {
+                return Ok(-1);
+            }
+            mem.write(&mut caller, buffer_ptr as usize, &msg)?;
+            Ok(msg.len() as i32)
         },
     )?;
 

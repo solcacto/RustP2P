@@ -7,5 +7,6 @@ default-run = "main"
 [dependencies]
 anyhow = "1"
 serde_json = "1"
+signaling_server = { path = "../signaling_server" }
 tungstenite = "0.26"
 wasmtime = "35"

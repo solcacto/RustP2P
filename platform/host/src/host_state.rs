@@ -1,5 +1,6 @@
 use crate::input_state::InputState;
 use crate::peer_connection::PeerConnection;
+use std::collections::VecDeque;
 use std::time::Instant;
 
 pub struct HostState {
@@ -13,6 +14,7 @@ pub struct HostState {
     peer_id: String,
     peer_connection: Option<PeerConnection>,
     connected_peers: Vec<String>,
+    incoming_messages: VecDeque<Vec<u8>>,
 }
 
 impl HostState {
@@ -29,6 +31,7 @@ impl HostState {
             previous_input_state: InputState::default(),
             peer_connection: None,
             connected_peers: Vec::new(),
+            incoming_messages: VecDeque::new(),
         }
     }
 
@@ -97,5 +100,13 @@ impl HostState {
 
     pub fn connected_peers_mut(&mut self) -> &mut Vec<String> {
         &mut self.connected_peers
+    }
+
+    pub fn incoming_messages(&self) -> &VecDeque<Vec<u8>> {
+        &self.incoming_messages
+    }
+
+    pub fn incoming_messages_mut(&mut self) -> &mut VecDeque<Vec<u8>> {
+        &mut self.incoming_messages
     }
 }
