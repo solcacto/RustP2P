@@ -84,6 +84,8 @@ pub struct HostState {
     last_signaling_probe: Option<u64>,
     /// Earliest `Instant` a reconnect may be attempted (exponential backoff).
     signaling_next_retry: Option<Instant>,
+    /// Avatar asset path (relative to the host asset folder) currently in use.
+    avatar_path: String,
 }
 
 impl HostState {
@@ -115,6 +117,7 @@ impl HostState {
             signaling_status: SignalingStatus::default(),
             last_signaling_probe: None,
             signaling_next_retry: None,
+            avatar_path: "avatar_standard.glb".to_string(),
         }
     }
 
@@ -313,5 +316,15 @@ impl HostState {
     /// Returns the earliest time a reconnect may be attempted.
     pub fn signaling_next_retry(&self) -> Option<Instant> {
         self.signaling_next_retry
+    }
+
+    /// Sets the avatar asset path (relative to the host asset folder).
+    pub fn set_avatar_path(&mut self, path: impl Into<String>) {
+        self.avatar_path = path.into();
+    }
+
+    /// Returns the avatar asset path currently in use.
+    pub fn avatar_path(&self) -> &str {
+        &self.avatar_path
     }
 }

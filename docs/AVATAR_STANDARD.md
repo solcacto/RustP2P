@@ -32,7 +32,7 @@ Finger chains (3 phalanges each):
 
 ## Attachment points
 
-Avatars must expose **7 named nodes** where cosmetic items, tools, or labels
+Avatars must expose **7 named nodes** where cosmetic meshes, tools, or labels
 can be attached:
 
 | Node | Location |
@@ -44,6 +44,11 @@ can be attached:
 | `Back` | between the shoulder blades |
 | `LeftFoot` | left ankle/sole |
 | `RightFoot` | right ankle/sole |
+
+The host slots cosmetic meshes onto these nodes at runtime (`--cosmetic
+<Point>:<kind>`, e.g. `Head:hat` or `RightHand:sword`). A cosmetic is parented
+to its attachment node, so it inherits the avatar's transform and moves with
+it. Cosmetics are attached to both the local and the remote avatar.
 
 ## Animations
 

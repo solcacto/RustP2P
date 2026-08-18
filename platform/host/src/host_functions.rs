@@ -8,9 +8,14 @@
 //!
 //! See `docs/HOST_FUNCTIONS.md` in the repository root for the full reference.
 
+use crate::avatar_standard;
 use crate::host_state::HostState;
 use anyhow::anyhow;
+use std::path::Path;
 use wasmtime::{Caller, Linker, Result};
+
+/// Directory (inside the host crate) that `load_avatar` may read avatars from.
+const AVATAR_ASSETS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets");
 
 /// Registers every host function on `linker` under the `env` import module.
 ///
@@ -275,6 +280,54 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<()> {
                 pc.send_to_all(&score.to_le_bytes())?;
             }
             Ok(())
+        },
+    )?;
+
+    linker.func_wrap(
+        "env",
+        "load_avatar",
+        |mut caller: Caller<'_, HostState>, path_ptr: i32, path_len: i32| -> Result<i32> {
+            if path_ptr < 0 || path_len < 0 {
+                return Ok(0);
+            }
+            let mem = caller
+                .get_export("memory")
+                .and_then(|e| e.into_memory())
+                .ok_or_else(|| anyhow!("guest has no memory export"))?;
+            let mem_size = mem.data_size(&caller);
+            let path_end = path_ptr as usize + path_len as usize;
+            if path_end > mem_size {
+                return Ok(0);
+            }
+            let path = String::from_utf8_lossy(&mem.data(&caller)[path_ptr as usize..path_end]);
+            let path = path.to_string();
+            if !path.ends_with(".glb") {
+                return Ok(0);
+            }
+
+            // The avatar must resolve inside the host asset folder so a guest
+            // can never make the host read an arbitrary file.
+            let assets = Path::new(AVATAR_ASSETS_DIR);
+            let resolved = match std::fs::canonicalize(assets.join(&path)) {
+                Ok(p) => p,
+                Err(_) => return Ok(0),
+            };
+            let Ok(assets_canon) = std::fs::canonicalize(assets) else {
+                return Ok(0);
+            };
+            if !resolved.starts_with(&assets_canon) {
+                return Ok(0);
+            }
+
+            let bytes = match std::fs::read(&resolved) {
+                Ok(b) => b,
+                Err(_) => return Ok(0),
+            };
+            if avatar_standard::validate_avatar_glb(&bytes).is_err() {
+                return Ok(0);
+            }
+            caller.data_mut().set_avatar_path(path.clone());
+            Ok(1)
         },
     )?;
 

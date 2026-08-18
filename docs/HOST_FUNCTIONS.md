@@ -146,6 +146,18 @@ Broadcasts the local score to every known peer as a **4-byte little-endian
 datagram**. The receiving host records it per-peer and shows it as the remote
 score.
 
+### `env::load_avatar(path_ptr: i32, path_len: i32) -> i32`
+
+Selects the avatar asset the host renders, by a `.glb` path relative to the
+host asset folder (e.g. `"avatars/blue.glb"`).
+
+- Returns `1` on success (the host state's avatar path is updated and the scene
+  hot-swaps), `0` on any failure.
+- *Security:* the path must resolve **inside the host asset folder** (path
+  traversal is rejected via canonical-path checking), must end in `.glb`, and
+  the asset must pass the avatar-standard validator (see
+  `docs/AVATAR_STANDARD.md`) before it is accepted.
+
 ---
 
 ## Wire formats (datagrams)

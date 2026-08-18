@@ -77,6 +77,7 @@ Key properties:
 │   │       ├── renderer.rs         # Bevy scene, game loop, keyboard, HUD
 │   │       ├── avatar_state.rs / input_state.rs / input_poller.rs
 │   │       ├── assets/avatar_standard.glb  # The standardized reference avatar
+│   │       ├── assets/avatars/blue.glb     # A second validated avatar variant
 │   │       ├── src/bin/            # play_game + framework tests/tools
 │   │       └── src/test_modules/   # WAT test guests (security/network/render)
 │   └── signaling_server/      # WebSocket discovery server
@@ -164,6 +165,21 @@ Each window shows your avatar, a blue-tinted clone of the remote player's
 avatar, and the HUD `Local Score: X | Remote Score: Y`. A tag registers when
 the two avatars come within **2.0 units** of each other.
 
+### Avatar customization
+
+The avatar is loaded from a configurable path (relative to the host asset
+folder) and validated against the avatar standard before the game starts, and
+the guest can change it at runtime through `load_avatar`. Cosmetic meshes slot
+onto the avatar's attachment points:
+
+```sh
+# player A: default avatar with a hat on the head
+cargo run -p host --bin play_game -- --role A --cosmetic Head:hat
+
+# player B: a different, blue avatar wielding a sword
+cargo run -p host --bin play_game -- --role B --avatar avatars/blue.glb --cosmetic RightHand:sword
+```
+
 ### Headless / automated verification
 
 Both players can be driven by scripted input for CI-style verification (role A
@@ -192,6 +208,7 @@ cargo run -p host --bin input_test                  # input getters
 cargo run -p host --bin network_wasm_test           # wasm<->wasm messages
 cargo run -p host --bin manifest_test               # manifest validation + hash gate
 cargo run -p host --bin avatar_standard_test        # avatar-standard validation
+cargo run -p host --bin avatar_customization_test    # load_avatar + avatar selection
 cargo run -p host --bin trap_test                   # graceful handling of wasm traps
 cargo run -p host --bin render_test                 # 3D scene + wasm-driven pose
 cargo run -p host --bin multiplayer_test -- --role A   # needs 2 terminals

@@ -18,7 +18,7 @@ const SIGNAL_SERVER: &str = "127.0.0.1:9001";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const GAME_PACKAGE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../guest");
 const MANIFEST_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../guest/game_manifest.json");
-const AVATAR_ASSET: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/avatar_standard.glb");
+const AVATAR_ASSET_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets");
 
 /// Commit 12: loads a game *package* — a `game_manifest.json` plus its Wasm —
 /// validates the manifest, refuses to load if the pinned SHA-256 doesn't match,
@@ -31,7 +31,7 @@ fn main() -> Result<()> {
         .map(|i| args[i + 1].clone())
         .unwrap_or_else(|| "A".to_string());
     if role != "A" && role != "B" {
-        bail!("usage: play_game --role A|B [--auto] [--frames N] [--no-exit]");
+        bail!("usage: play_game --role A|B [--avatar <path>] [--cosmetic <Point>:<kind>] [--auto] [--frames N] [--no-exit]");
     }
     let local_id = format!("Peer{role}");
     let remote_id = if role == "A" { "PeerB" } else { "PeerA" };
@@ -44,6 +44,24 @@ fn main() -> Result<()> {
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(900);
+    // Avatar asset path, relative to the host asset folder.
+    let avatar_path = args
+        .iter()
+        .position(|a| a == "--avatar")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .unwrap_or_else(|| "avatar_standard.glb".to_string());
+    // Cosmetic slots, repeatable: --cosmetic <Point>:<kind>, e.g. Head:hat.
+    let cosmetics: Vec<(renderer::AttachmentPoint, renderer::CosmeticKind)> = args
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.as_str() == "--cosmetic")
+        .filter_map(|(i, _)| args.get(i + 1))
+        .filter_map(|spec| {
+            let (point, kind) = spec.split_once(':')?;
+            Some((renderer::AttachmentPoint::parse(point)?, renderer::CosmeticKind::parse(kind)?))
+        })
+        .collect();
 
     // Shared pose bridges between the Wasm guest, the network poll, and Bevy.
     let avatar_state = Arc::new(Mutex::new(AvatarState::default()));
@@ -70,16 +88,23 @@ fn main() -> Result<()> {
     manifest.verify_wasm(&manifest.wasm_entry, &wasm_bytes)?;
     let wasm_size = wasm_bytes.len();
 
-    // The standardized avatar is validated before rendering starts; a
-    // non-conforming avatar refuses to load.
-    let avatar_report = avatar_standard::validate_avatar_path(AVATAR_ASSET)?;
+    // The avatar is loaded from a configurable path before the game starts and
+    // validated against the avatar standard; a non-conforming avatar refuses to
+    // load.
+    let avatar_file = std::path::Path::new(AVATAR_ASSET_DIR).join(&avatar_path);
+    let avatar_report = avatar_standard::validate_avatar_path(&avatar_file)?;
     println!(
-        "[{role}] avatar OK: {} bones, {} triangles, {} textures, {} animations",
+        "[{role}] avatar '{avatar_path}': {} bones, {} triangles, {} textures, {} animations",
         avatar_report.bone_count,
         avatar_report.triangle_count,
         avatar_report.texture_count,
         avatar_report.animations.len()
     );
+    let cosmetic_desc: Vec<String> = cosmetics
+        .iter()
+        .map(|(p, k)| format!("{}:{:?}", p.as_str(), k))
+        .collect();
+    println!("[{role}] cosmetics: {}", if cosmetic_desc.is_empty() { "none".to_string() } else { cosmetic_desc.join(", ") });
 
     let engine = Engine::default();
     let mut linker = Linker::new(&engine);
@@ -89,6 +114,7 @@ fn main() -> Result<()> {
     store.data_mut().set_avatar_state(Some(avatar_state.clone()));
     store.data_mut().set_remote_avatars(remote_avatars.clone());
     store.data_mut().set_movement_axis(axis);
+    store.data_mut().set_avatar_path(avatar_path.clone());
     store.data_mut().set_peer_connection(Some(connect_with_retry(&local_id)?));
     let instance = linker.instantiate(&mut store, &module)?;
     let game_tick = instance.get_typed_func::<(), ()>(&mut store, "game_tick")?;
@@ -106,6 +132,7 @@ fn main() -> Result<()> {
     let mut app = renderer::build_app(avatar_state.clone(), remote_avatars.clone());
     let store_handle = Arc::new(Mutex::new(store));
     app.insert_resource(renderer::AutoInput(auto));
+    app.insert_resource(renderer::CosmeticSlots(cosmetics));
     app.insert_resource(renderer::WasmRuntime {
         store: store_handle.clone(),
         render_tick: game_tick,

@@ -104,6 +104,25 @@ const BODY: [([f32; 3], [f32; 3]); 15] = [
 
 fn main() -> Result<()> {
     assert_eq!(BONES.len(), 52, "skeleton must have exactly 52 bones");
+
+    // CLI: --out <path> (default the reference asset) and --color r,g,b (0..1).
+    let args: Vec<String> = std::env::args().collect();
+    let out_path = args
+        .iter()
+        .position(|a| a == "--out")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .unwrap_or_else(|| OUT.to_string());
+    let color: [f32; 3] = args
+        .iter()
+        .position(|a| a == "--color")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| {
+            let v: Vec<f32> = s.split(',').filter_map(|x| x.parse().ok()).collect();
+            [v.first().copied().unwrap_or(0.72), v.get(1).copied().unwrap_or(0.72), v.get(2).copied().unwrap_or(0.78)]
+        })
+        .unwrap_or([0.72, 0.72, 0.78]);
+
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
     let mut min_p = [f32::MAX; 3];
@@ -263,7 +282,7 @@ fn main() -> Result<()> {
         "materials": [{
             "name": "avatar_body",
             "pbrMetallicRoughness": {
-                "baseColorFactor": [0.72, 0.72, 0.78, 1.0],
+                "baseColorFactor": [color[0], color[1], color[2], 1.0],
                 "metallicFactor": 0.0,
                 "roughnessFactor": 0.85,
             },
@@ -294,7 +313,21 @@ fn main() -> Result<()> {
     out.extend_from_slice(b"BIN\0");
     out.extend_from_slice(&bin_padded);
 
-    let path = PathBuf::from(OUT);
+    let path = {
+        let raw = PathBuf::from(&out_path);
+        if raw.is_absolute() {
+            raw
+        } else {
+            // Resolve relative paths against the host crate so the asset lands
+            // next to the other avatar assets regardless of the working dir.
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(raw)
+        }
+    };
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
     std::fs::write(&path, &out)?;
     println!(
         "wrote {} ({triangles} triangles, {} bones, {} animations, {} bytes)",

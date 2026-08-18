@@ -91,6 +91,79 @@ pub struct AutoInput(
 #[derive(Component)]
 pub struct ScoreText;
 
+/// Records which avatar asset a spawned avatar scene was loaded from, so the
+/// scene can be hot-swapped when the guest changes the avatar.
+#[derive(Component, Clone, PartialEq)]
+pub struct AvatarSource(pub String);
+
+/// Named attachment points every standard avatar exposes (see
+/// `docs/AVATAR_STANDARD.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachmentPoint {
+    Head,
+    Chest,
+    LeftHand,
+    RightHand,
+    Back,
+    LeftFoot,
+    RightFoot,
+}
+
+impl AttachmentPoint {
+    /// Parses an attachment point by its node name.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "Head" => Self::Head,
+            "Chest" => Self::Chest,
+            "LeftHand" => Self::LeftHand,
+            "RightHand" => Self::RightHand,
+            "Back" => Self::Back,
+            "LeftFoot" => Self::LeftFoot,
+            "RightFoot" => Self::RightFoot,
+            _ => return None,
+        })
+    }
+
+    /// The glb node name this attachment point binds to.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Head => "Head",
+            Self::Chest => "Chest",
+            Self::LeftHand => "LeftHand",
+            Self::RightHand => "RightHand",
+            Self::Back => "Back",
+            Self::LeftFoot => "LeftFoot",
+            Self::RightFoot => "RightFoot",
+        }
+    }
+}
+
+/// Built-in cosmetic meshes the host can slot onto attachment points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CosmeticKind {
+    Hat,
+    Sword,
+}
+
+impl CosmeticKind {
+    /// Parses a cosmetic by name.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "hat" => Some(Self::Hat),
+            "sword" => Some(Self::Sword),
+            _ => None,
+        }
+    }
+}
+
+/// Cosmetic slots the host attaches to avatar attachment points.
+#[derive(Resource, Clone, Default)]
+pub struct CosmeticSlots(pub Vec<(AttachmentPoint, CosmeticKind)>);
+
+/// Marker identifying a cosmetic mesh entity parented to an attachment point.
+#[derive(Component)]
+pub struct Cosmetic;
+
 /// Holds the instantiated Wasm render module so a Bevy `Update` system can
 /// drive exactly one guest tick per rendered frame.
 #[derive(Resource)]
@@ -149,15 +222,18 @@ pub fn build_app(
     app.insert_resource(AvatarStateHandle(avatar_state));
     app.insert_resource(RemoteAvatarsHandle(remote_avatars));
     app.insert_resource(AutoInput(false));
+    app.insert_resource(CosmeticSlots::default());
     app.add_systems(Startup, setup_scene);
     app.add_systems(
         Update,
         (
             read_keyboard,
             wasm_render_tick,
+            sync_avatar_scene,
             apply_avatar_pose,
             sync_remote_avatars,
             tint_remote_avatars,
+            attach_cosmetics,
             monitor_signaling,
             update_hud,
             exit_after_wasm_error,
@@ -453,17 +529,148 @@ fn apply_avatar_pose(
     }
 }
 
+/// Spawns (and hot-swaps) the local avatar scene from the avatar path in host
+/// state, so the avatar is configurable before the game starts and can be
+/// changed at runtime by the guest's `load_avatar`.
+fn sync_avatar_scene(
+    runtime: Res<WasmRuntime>,
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    avatars: Query<(Entity, &AvatarSource), With<Avatar>>,
+) {
+    let desired = runtime.store.lock().unwrap().data().avatar_path().to_string();
+    match avatars.iter().next() {
+        Some((entity, source)) if source.0 == desired => {
+            let _ = entity;
+        }
+        Some((entity, _)) => {
+            commands.entity(entity).despawn();
+            spawn_avatar(&mut commands, &asset_server, desired);
+        }
+        None => spawn_avatar(&mut commands, &asset_server, desired),
+    }
+}
+
+/// Spawns the local avatar scene root for `path` (relative to the asset dir).
+fn spawn_avatar(commands: &mut Commands, asset_server: &AssetServer, path: String) {
+    let scene = asset_server.load(GltfAssetLabel::Scene(0).from_asset(path.clone()));
+    commands.spawn((
+        SceneBundle {
+            scene,
+            ..default()
+        },
+        Avatar,
+        AvatarSource(path),
+    ));
+}
+
+/// Query of every avatar scene root (local or remote).
+type AvatarRoots<'w, 's> = Query<'w, 's, Entity, Or<(With<Avatar>, With<RemoteAvatar>)>>;
+
+/// Slots cosmetic meshes onto the avatar's named attachment points.
+///
+/// Runs each frame so it picks up attachment nodes as they appear after the
+/// asynchronous glb scene load, and tracks already-attached cosmetics so each
+/// slot is applied exactly once per avatar.
+#[allow(clippy::type_complexity)]
+fn attach_cosmetics(
+    mut commands: Commands,
+    avatars: AvatarRoots,
+    tree: Query<(Option<&Children>, Option<&Name>)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    slots: Res<CosmeticSlots>,
+    mut attached: Local<Vec<(Entity, AttachmentPoint, CosmeticKind)>>,
+) {
+    if slots.0.is_empty() {
+        return;
+    }
+    for root in &avatars {
+        for (point, kind) in &slots.0 {
+            let key = (root, *point, *kind);
+            if attached.contains(&key) {
+                continue;
+            }
+            let Some(attach_node) = find_named_node(root, point.as_str(), &tree) else {
+                continue; // scene not fully spawned yet; retry next frame
+            };
+            let mesh = cosmetic_mesh(&mut meshes, *kind);
+            let material = cosmetic_material(&mut materials, *kind);
+            commands.entity(attach_node).with_children(|parent| {
+                parent.spawn((
+                    MaterialMeshBundle {
+                        mesh: mesh.clone(),
+                        material: material.clone(),
+                        ..default()
+                    },
+                    Cosmetic,
+                ));
+            });
+            println!("[cosmetic] attached {:?} to attachment point '{}'", kind, point.as_str());
+            attached.push(key);
+        }
+    }
+}
+
+/// Depth-first search for a descendant node with the given name.
+fn find_named_node(
+    root: Entity,
+    name: &str,
+    tree: &Query<(Option<&Children>, Option<&Name>)>,
+) -> Option<Entity> {
+    let mut stack = vec![root];
+    while let Some(entity) = stack.pop() {
+        if entity != root {
+            if let Ok((_, Some(node_name))) = tree.get(entity) {
+                if node_name.as_str() == name {
+                    return Some(entity);
+                }
+            }
+        }
+        if let Ok((Some(children), _)) = tree.get(entity) {
+            stack.extend(children.iter().copied());
+        }
+    }
+    None
+}
+
+/// Builds the mesh for a cosmetic kind.
+fn cosmetic_mesh(meshes: &mut Assets<Mesh>, kind: CosmeticKind) -> Handle<Mesh> {
+    match kind {
+        CosmeticKind::Hat => meshes.add(Cuboid::new(0.22, 0.12, 0.22)),
+        CosmeticKind::Sword => meshes.add(Cuboid::new(0.06, 1.0, 0.06)),
+    }
+}
+
+/// Builds the material for a cosmetic kind.
+fn cosmetic_material(
+    materials: &mut Assets<StandardMaterial>,
+    kind: CosmeticKind,
+) -> Handle<StandardMaterial> {
+    let color = match kind {
+        CosmeticKind::Hat => Color::srgb_u8(200, 60, 40),
+        CosmeticKind::Sword => Color::srgb_u8(200, 200, 220),
+    };
+    materials.add(StandardMaterial {
+        base_color: color,
+        perceptual_roughness: 0.4,
+        ..default()
+    })
+}
+
 /// Spawns, updates, and despawns remote avatar entities from the shared pose
 /// map: one glb clone per remote peer, tinted blue, mirroring their latest pose
 /// and removed if it stops reporting for more than 2 seconds.
 fn sync_remote_avatars(
     handle: Res<RemoteAvatarsHandle>,
+    runtime: Res<WasmRuntime>,
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut avatars: Query<(Entity, &RemotePeerId, &mut Transform)>,
 ) {
     let now = Instant::now();
     let map = handle.0.lock().unwrap();
+    let avatar_path = runtime.store.lock().unwrap().data().avatar_path().to_string();
 
     let mut stale = Vec::new();
     for (entity, peer, _) in avatars.iter() {
@@ -478,7 +685,7 @@ fn sync_remote_avatars(
         commands.entity(entity).despawn();
     }
 
-    let scene = asset_server.load(GltfAssetLabel::Scene(0).from_asset("avatar.glb"));
+    let scene = asset_server.load(GltfAssetLabel::Scene(0).from_asset(avatar_path.clone()));
     for (peer_id, pose) in map.iter() {
         if now.duration_since(pose.last_seen).as_secs_f32() >= 2.0 {
             continue;
@@ -496,6 +703,7 @@ fn sync_remote_avatars(
                     },
                     RemoteAvatar,
                     RemotePeerId(peer_id.clone()),
+                    AvatarSource(avatar_path.clone()),
                 ));
             }
         }
@@ -557,7 +765,6 @@ fn terminate_after_frames(
 
 fn setup_scene(
     mut commands: Commands,
-    asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -584,11 +791,9 @@ fn setup_scene(
         ..default()
     });
 
-    let avatar = asset_server.load(GltfAssetLabel::Scene(0).from_asset("avatar_standard.glb"));
-    commands.spawn((SceneBundle {
-        scene: avatar,
-        ..default()
-    }, Avatar));
+    // The local avatar is spawned and hot-swapped by `sync_avatar_scene`,
+    // driven by the avatar path the host (or the guest's `load_avatar`)
+    // selects.
 
     commands.spawn((
         TextBundle::from_section(
