@@ -12,6 +12,7 @@ use crate::avatar_standard;
 use crate::host_state::HostState;
 use anyhow::anyhow;
 use std::path::Path;
+use std::time::Instant;
 use wasmtime::{Caller, Linker, Result};
 
 /// Directory (inside the host crate) that `load_avatar` may read avatars from.
@@ -186,6 +187,7 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<()> {
         "env",
         "update_avatar_transform",
         |caller: Caller<'_, HostState>, x: f32, y: f32, z: f32, rot_y: f32| -> Result<()> {
+            let start = Instant::now();
             if let Some(avatar) = caller.data().avatar_state() {
                 let mut pose = avatar.lock().unwrap();
                 pose.x = x;
@@ -193,6 +195,7 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<()> {
                 pose.z = z;
                 pose.rot_y = rot_y;
             }
+            host_fn_time("update_avatar_transform", start.elapsed());
             Ok(())
         },
     )?;
@@ -201,6 +204,7 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<()> {
         "env",
         "broadcast_avatar_pose",
         |caller: Caller<'_, HostState>, x: f32, y: f32, z: f32, rot_y: f32| -> Result<()> {
+            let start = Instant::now();
             if !(x.is_finite() && y.is_finite() && z.is_finite() && rot_y.is_finite()) {
                 return Ok(());
             }
@@ -212,6 +216,7 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<()> {
             if let Some(pc) = caller.data().peer_connection() {
                 pc.send_to_all(&payload)?;
             }
+            host_fn_time("broadcast_avatar_pose", start.elapsed());
             Ok(())
         },
     )?;
@@ -223,6 +228,7 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<()> {
          peer_id_ptr: i32,
          peer_id_len: i32,
          out_pose_ptr: i32| -> Result<i32> {
+            let start = Instant::now();
             if peer_id_ptr < 0 || peer_id_len < 0 || out_pose_ptr < 0 {
                 return Ok(0);
             }
@@ -251,6 +257,7 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<()> {
             buf.extend_from_slice(&pose.z.to_le_bytes());
             buf.extend_from_slice(&pose.rot_y.to_le_bytes());
             mem.write(&mut caller, out_pose_ptr as usize, &buf)?;
+            host_fn_time("get_remote_avatar_pose", start.elapsed());
             Ok(1)
         },
     )?;
@@ -460,4 +467,13 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<()> {
     )?;
 
     Ok(())
+}
+
+/// Logs a warning when a host function takes longer than 1 ms (a likely
+/// bottleneck, e.g. lock contention or an oversized allocation).
+fn host_fn_time(function: &str, elapsed: std::time::Duration) {
+    let ms = elapsed.as_secs_f64() * 1000.0;
+    if ms > 1.0 {
+        tracing::warn!(function, time_ms = ms, "Slow host function");
+    }
 }

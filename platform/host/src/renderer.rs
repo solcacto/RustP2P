@@ -12,10 +12,12 @@
 use crate::avatar_state::{AvatarPose, AvatarState};
 use crate::host_state::{HostState, SignalingStatus};
 use crate::input_state::InputState;
+use crate::profiling::SharedFrameStats;
 use bevy::app::AppExit;
 use bevy::core::{FrameCount, TaskPoolPlugin, TypeRegistrationPlugin};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::core_pipeline::CorePipelinePlugin;
+use bevy::diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin};
 use bevy::gltf::GltfAssetLabel;
 use bevy::input::keyboard::{KeyboardInput, KeyCode};
 use bevy::input::ButtonState;
@@ -217,6 +219,8 @@ pub fn build_app(
     app.insert_resource(RemoteAvatarsHandle(remote_avatars));
     app.insert_resource(AutoInput(false));
     app.insert_resource(CosmeticSlots::default());
+    app.insert_resource(SharedFrameStats::default());
+    app.add_plugins((FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin::default()));
     app.add_systems(Startup, setup_scene);
     app.add_systems(
         Update,
@@ -231,7 +235,9 @@ pub fn build_app(
             tint_remote_avatars,
             attach_cosmetics,
             monitor_signaling,
+            measure_rtt,
             update_hud,
+            record_frame_stats,
             exit_after_wasm_error,
         )
             .chain(),
@@ -247,12 +253,14 @@ pub fn build_app(
 /// A guest trap is a recoverable condition: it is recorded in host state (and
 /// shown in the HUD), the guest is no longer called, and the app exits
 /// gracefully — the host itself never crashes.
-fn wasm_render_tick(runtime: Res<WasmRuntime>) {
+fn wasm_render_tick(runtime: Res<WasmRuntime>, stats: Res<SharedFrameStats>) {
     let mut guard = runtime.store.lock().unwrap();
     {
         let store = &mut *guard;
         store.data_mut().update_frame();
+        let net_start = std::time::Instant::now();
         poll_network(store);
+        stats.0.lock().unwrap().add_network(net_start.elapsed().as_secs_f64() * 1000.0);
     }
     let trapped = {
         let store = &mut *guard;
@@ -260,7 +268,10 @@ fn wasm_render_tick(runtime: Res<WasmRuntime>) {
             None
         } else {
             let frame = store.data().frame_count();
-            match runtime.render_tick.call(store, ()) {
+            let wasm_start = std::time::Instant::now();
+            let result = runtime.render_tick.call(store, ());
+            stats.0.lock().unwrap().add_wasm(wasm_start.elapsed().as_secs_f64() * 1000.0);
+            match result {
                 Ok(()) => None,
                 Err(err) => Some((format!("{err:#}"), frame)),
             }
@@ -377,7 +388,10 @@ fn read_keyboard(
     mut events: EventReader<KeyboardInput>,
     runtime: Res<WasmRuntime>,
     auto: Res<AutoInput>,
+    stats: Res<SharedFrameStats>,
 ) {
+    let start = std::time::Instant::now();
+    stats.0.lock().unwrap().begin_frame();
     let mut input = InputState::default();
     if auto.0 {
         let store = runtime.store.lock().unwrap();
@@ -402,6 +416,47 @@ fn read_keyboard(
     }
     let mut store = runtime.store.lock().unwrap();
     store.data_mut().set_input(input);
+    stats.0.lock().unwrap().add_input(start.elapsed().as_secs_f64() * 1000.0);
+}
+
+/// Periodically pings every known peer to measure round-trip time, and records
+/// the samples into the shared frame stats.
+fn measure_rtt(
+    runtime: Res<WasmRuntime>,
+    stats: Res<SharedFrameStats>,
+    frames: Res<FrameCount>,
+) {
+    const PING_EVERY_FRAMES: u64 = 60;
+    if !(frames.0 as u64).is_multiple_of(PING_EVERY_FRAMES) {
+        return;
+    }
+    let store = runtime.store.lock().unwrap();
+    if let Some(pc) = store.data().peer_connection() {
+        pc.ping_all();
+        if let Some(avg) = pc.stats().avg_rtt_ms() {
+            stats.0.lock().unwrap().record_rtt(avg);
+        }
+    }
+}
+
+/// Closes the frame's timing window, pushes the sample, and emits the tracing
+/// frame-timing breakdown (visible with `RUST_LOG=debug`).
+fn record_frame_stats(stats: Res<SharedFrameStats>) {
+    let mut s = stats.0.lock().unwrap();
+    s.end_frame();
+    let frame = s.frames;
+    let t = s.samples().last().copied().unwrap_or_default();
+    tracing::debug!(
+        frame,
+        frame_ms = t.frame_ms,
+        input_ms = t.input_ms,
+        network_ms = t.network_ms,
+        wasm_ms = t.wasm_ms,
+        "Frame timing"
+    );
+    if frame.is_multiple_of(120) {
+        tracing::info!(frame, avg_frame_ms = t.frame_ms, "Frame timing");
+    }
 }
 
 /// Builds and updates the score/status HUD from host state: scores, peer

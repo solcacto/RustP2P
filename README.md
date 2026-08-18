@@ -79,7 +79,8 @@ Key properties:
 │   │       ├── cosmetic.rs         # Signed cosmetic verification
 │   │       ├── ipfs.rs             # IPFS publish/fetch (Kubo HTTP API)
 │   │       ├── manifest.rs         # Game manifest validation + hash verify
-│   │       ├── peer_connection.rs  # UDP + WebSocket signaling
+│   │       ├── profiling.rs        # Frame timing + perf report data
+│   │       ├── peer_connection.rs  # UDP + WebSocket signaling (+ RTT stats)
 │   │       ├── renderer.rs         # Bevy scene, game loop, keyboard, HUD
 │   │       ├── avatar_state.rs / input_state.rs / input_poller.rs
 │   │       ├── assets/avatar_standard.glb  # The standardized reference avatar
@@ -244,6 +245,27 @@ The HUD shows `Zone: chunk (x,z) @ owner (N edits)` as you move. Guest SDK
 `Context` exposes the host functions; the handoff itself is handled entirely
 host-side. Verify with `cargo run -p host --bin zone_transition_test` (a live
 UDP handoff between three peers).
+
+## Performance profiling
+
+The platform measures performance at every layer. Three tools
+([`docs/PROFILING.md`](docs/PROFILING.md)):
+
+```sh
+# Per-frame timing breakdown (input/network/wasm/bevy) + Bevy diagnostics:
+RUST_LOG=debug cargo run -p host --bin play_game -- --role A
+
+# Summary performance report over N frames (frame times, RTT, memory):
+cargo run -p host --bin perf_report -- --frames 1000
+
+# Criterion benchmark suite (HTML reports in target/criterion/):
+cargo bench -p host
+```
+
+Host functions log a warning when a call exceeds 1 ms, and the P2P layer
+measures round-trip time continuously (`PeerStats`). Baseline (Apple M1,
+debug build): `wasm_game_tick` ≈ 313 ns, `wasm_instantiation` ≈ 492 µs, and
+Bevy rendering dominates the frame.
 
 ## Run the game
 
@@ -465,6 +487,8 @@ cargo run -p host --bin avatar_standard_test        # avatar-standard validation
 cargo run -p host --bin chunk_test                  # spatial chunk math, claims, DHT
 cargo run -p host --bin chunk_state_test            # chunk state persistence + offline ruins*
 cargo run -p host --bin zone_transition_test        # seamless zone handoff (UDP)
+cargo run -p host --bin perf_report -- --frames 500 # performance summary report
+cargo bench -p host                                  # criterion benchmarks (target/criterion/)
 cargo run -p host --bin avatar_customization_test    # load_avatar + avatar selection
 cargo run -p host --bin cosmetic_signature_test      # signed cosmetic verification
 cargo run -p host --bin distribution_test            # IPFS publish/fetch round-trip*
@@ -519,4 +543,6 @@ cargo doc --workspace --no-deps
   signature, security guarantees, and usage.
 - [`docs/SECURITY.md`](docs/SECURITY.md) — full threat model: what the sandbox
   prevents, what it doesn't, and the developer's responsibilities.
+- [`docs/PROFILING.md`](docs/PROFILING.md) — profiling tools, metrics, and how
+  to interpret the reports.
 - API docs: `cargo doc --workspace --no-deps` (or browse `target/doc`).
