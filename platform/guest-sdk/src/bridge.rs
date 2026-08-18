@@ -51,6 +51,9 @@ mod imp {
             pub fn load_avatar(path_ptr: *const u8, path_len: usize) -> i32;
             pub fn broadcast_chunk_claim(origin_x: i32, origin_z: i32, extent_x: i32, extent_z: i32);
             pub fn get_chunk_owner(chunk_x: i32, chunk_z: i32, out_peer_ptr: *mut u8, out_peer_len: usize) -> i32;
+            pub fn save_chunk_state(edit_x: f32, edit_z: f32, kind_ptr: *const u8, kind_len: usize, value: f32) -> i32;
+            pub fn publish_chunk_states() -> i32;
+            pub fn load_remote_chunk_state(chunk_x: i32, chunk_z: i32, out_buf: *mut u8, out_len: usize) -> i32;
         }
     }
 
@@ -123,6 +126,22 @@ mod imp {
         let n = unsafe { raw::get_chunk_owner(chunk_x, chunk_z, buffer.as_mut_ptr(), buffer.len()) };
         if n != 0 { Some(n as usize) } else { None }
     }
+
+    pub fn save_chunk_state(edit_x: f32, edit_z: f32, kind: &[u8], value: f32) -> bool {
+        unsafe { raw::save_chunk_state(edit_x, edit_z, kind.as_ptr(), kind.len(), value) != 0 }
+    }
+
+    pub fn publish_chunk_states() -> u32 {
+        unsafe { raw::publish_chunk_states() as u32 }
+    }
+
+    pub fn load_remote_chunk_state(chunk_x: i32, chunk_z: i32, buffer: &mut [u8]) -> Option<usize> {
+        if buffer.is_empty() {
+            return None;
+        }
+        let n = unsafe { raw::load_remote_chunk_state(chunk_x, chunk_z, buffer.as_mut_ptr(), buffer.len()) };
+        if n != 0 { Some(n as usize) } else { None }
+    }
 }
 
 /// Native test double: records what the game asked for and feeds it back.
@@ -155,6 +174,9 @@ mod imp {
         pub received_messages: Vec<Vec<u8>>,
         pub chunk_claims: Vec<(i32, i32, i32, i32)>,
         pub chunk_owners: HashMap<(i32, i32), String>,
+        pub saved_edits: Vec<(f32, f32, String, f32)>,
+        pub published_states: u32,
+        pub remote_state: Option<String>,
     }
 
     static MOCK: LazyLock<Mutex<MockState>> = LazyLock::new(|| Mutex::new(MockState::default()));
@@ -233,6 +255,27 @@ mod imp {
         let s = MOCK.lock().unwrap();
         let owner = s.chunk_owners.get(&(chunk_x, chunk_z))?;
         let bytes = owner.as_bytes();
+        let n = bytes.len().min(buffer.len());
+        buffer[..n].copy_from_slice(&bytes[..n]);
+        Some(n)
+    }
+
+    pub fn save_chunk_state(edit_x: f32, edit_z: f32, kind: &[u8], value: f32) -> bool {
+        let kind = String::from_utf8_lossy(kind).into_owned();
+        MOCK.lock().unwrap().saved_edits.push((edit_x, edit_z, kind, value));
+        true
+    }
+
+    pub fn publish_chunk_states() -> u32 {
+        let mut s = MOCK.lock().unwrap();
+        s.published_states += 1;
+        s.published_states
+    }
+
+    pub fn load_remote_chunk_state(_chunk_x: i32, _chunk_z: i32, buffer: &mut [u8]) -> Option<usize> {
+        let s = MOCK.lock().unwrap();
+        let json = s.remote_state.as_ref()?;
+        let bytes = json.as_bytes();
         let n = bytes.len().min(buffer.len());
         buffer[..n].copy_from_slice(&bytes[..n]);
         Some(n)

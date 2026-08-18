@@ -508,7 +508,18 @@ fn poll_network(store: &mut wasmtime::Store<HostState>) {
                 // self-authenticating (no reverse lookup needed).
                 if let Some(claim) = crate::chunk::ChunkClaim::from_wire(&payload) {
                     chunks.apply_claim(&claim, addr);
-                    println!("[chunk] {} hosts chunk region ({},{})", claim.peer_id, claim.origin_x, claim.origin_z);
+                    println!(
+                        "[chunk] {} hosts chunk region ({},{})",
+                        claim.peer_id, claim.origin_x, claim.origin_z
+                    );
+                } else if let Some(pointer) = crate::chunk::ChunkStatePointer::from_wire(&payload) {
+                    // Cache the owner's chunk state so it survives their
+                    // departure ("ruins" available while the owner is offline).
+                    store.data_mut().ingest_state_pointer(&pointer, addr);
+                    println!(
+                        "[chunk-state] cached '{}' for chunk ({},{})",
+                        pointer.peer_id, pointer.chunk_x, pointer.chunk_z
+                    );
                 }
             }
         }

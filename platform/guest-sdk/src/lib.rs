@@ -153,6 +153,26 @@ impl Context {
         let n = bridge::get_chunk_owner(chunk_x, chunk_z, &mut buf)?;
         Some(String::from_utf8_lossy(&buf[..n]).into_owned())
     }
+
+    /// Records a chunk modification for the chunk this peer owns (persisted
+    /// locally and re-published to IPFS on shutdown).
+    pub fn save_chunk_edit(&self, x: f32, z: f32, kind: &str, value: f32) -> bool {
+        bridge::save_chunk_state(x, z, kind.as_bytes(), value)
+    }
+
+    /// Publishes every locally-saved chunk state to IPFS and broadcasts the
+    /// state pointers so peers can cache them. Returns the number published.
+    pub fn publish_chunk_states(&self) -> u32 {
+        bridge::publish_chunk_states()
+    }
+
+    /// Loads a remote chunk's persisted state from IPFS (the "ruins"), even
+    /// while its owner is offline, returning the state JSON.
+    pub fn load_remote_chunk_state(&self, chunk_x: i32, chunk_z: i32) -> Option<String> {
+        let mut buf = [0u8; 4096];
+        let n = bridge::load_remote_chunk_state(chunk_x, chunk_z, &mut buf)?;
+        Some(String::from_utf8_lossy(&buf[..n]).into_owned())
+    }
 }
 
 /// Runs the game: lazily creates one instance per concrete `Game` type and

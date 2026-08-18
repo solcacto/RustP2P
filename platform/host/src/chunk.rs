@@ -7,9 +7,11 @@
 //! "who is nearest to chunk X?" queries. (Implemented over the platform's UDP
 //! mesh rather than the libp2p-kad crate, but with the same semantics.)
 
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Instant;
 
 /// World-space size of one chunk (world units per chunk edge).
@@ -18,9 +20,14 @@ pub const CHUNK_SIZE: f32 = 100.0;
 /// Wire tag marking a chunk-claim datagram (claims are larger than 16 bytes,
 /// so they can never be confused with poses/scores).
 pub const CLAIM_TAG: u8 = 0x01;
+/// Wire tag marking a chunk-state pointer datagram.
+pub const STATE_TAG: u8 = 0x02;
+
+/// Local directory (inside the host crate) where owned chunk states persist.
+pub const CHUNKS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/chunks");
 
 /// A position in the chunk grid.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ChunkCoord {
     /// Chunk column (world X / [`CHUNK_SIZE`], floored).
     pub x: i32,
@@ -124,6 +131,10 @@ pub struct ChunkEntry {
     pub peer_id: String,
     /// The hosting peer's UDP address.
     pub address: SocketAddr,
+    /// The owner's identity key (`ed25519:<hex>`), if known.
+    pub owner_pubkey: Option<String>,
+    /// CID of the chunk's persisted state cached on IPFS, if published.
+    pub state_cid: Option<String>,
     /// When the entry was last confirmed by a claim.
     pub last_seen: Instant,
 }
@@ -151,9 +162,40 @@ impl ChunkDht {
             ChunkEntry {
                 peer_id: peer_id.into(),
                 address,
+                owner_pubkey: None,
+                state_cid: None,
                 last_seen: Instant::now(),
             },
         );
+    }
+
+    /// Records the owner's identity key for a chunk.
+    pub fn record_owner(&mut self, coord: ChunkCoord, owner_pubkey: impl Into<String>) {
+        if let Some(e) = self.entries.get_mut(&coord) {
+            e.owner_pubkey = Some(owner_pubkey.into());
+        }
+    }
+
+    /// Records the IPFS CID of a chunk's persisted state (the "ruins" cache),
+    /// keyed by the chunk coordinate + owner key. Creating the entry with the
+    /// owner's details if it is not yet present.
+    pub fn record_state(
+        &mut self,
+        coord: ChunkCoord,
+        state_cid: impl Into<String>,
+        owner_pubkey: impl Into<String>,
+        peer_id: impl Into<String>,
+        address: SocketAddr,
+    ) {
+        let entry = self.entries.entry(coord).or_insert_with(|| ChunkEntry {
+            peer_id: peer_id.into(),
+            address,
+            owner_pubkey: None,
+            state_cid: None,
+            last_seen: Instant::now(),
+        });
+        entry.state_cid = Some(state_cid.into());
+        entry.owner_pubkey = Some(owner_pubkey.into());
     }
 
     /// Applies every chunk of a claim.
@@ -194,4 +236,122 @@ impl ChunkDht {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+}
+
+/// A single modification a peer makes to a chunk it owns.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChunkEdit {
+    /// World-space X of the modification.
+    pub x: f32,
+    /// World-space Z of the modification.
+    pub z: f32,
+    /// What was modified, e.g. `"ruin"`, `"structure"`, `"block"`.
+    pub kind: String,
+    /// A scalar describing the modification (height, scale, count...).
+    pub value: f32,
+}
+
+/// The persisted state of one chunk, owned by a peer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChunkState {
+    /// The chunk this state describes.
+    pub chunk: ChunkCoord,
+    /// The owning peer's id.
+    pub owner: String,
+    /// The owning peer's identity key (`ed25519:<hex>`); part of the IPFS key.
+    pub owner_pubkey: String,
+    /// Unix milliseconds of the last modification.
+    pub modified_at: u64,
+    /// The modifications (ruins/structures) in this chunk.
+    pub edits: Vec<ChunkEdit>,
+}
+
+impl ChunkState {
+    /// Applies an edit, updating the modification timestamp.
+    pub fn apply(&mut self, edit: ChunkEdit) {
+        self.edits.push(edit);
+        self.modified_at = now_ms();
+    }
+}
+
+/// A pointer to a chunk's state cached on IPFS, broadcast when the owning peer
+/// goes offline so others can load the "ruins" in its absence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChunkStatePointer {
+    /// The peer that published the state.
+    pub peer_id: String,
+    /// The owner's identity key (`ed25519:<hex>`).
+    pub owner_pubkey: String,
+    /// The chunk the state describes.
+    pub chunk_x: i32,
+    pub chunk_z: i32,
+    /// The IPFS CID of the persisted [`ChunkState`].
+    pub state_cid: String,
+}
+
+impl ChunkStatePointer {
+    /// The IPFS cache key for a chunk state: chunk coordinate + owner key.
+    pub fn key(&self) -> String {
+        format!("chunk_{}_{}_{}", self.chunk_x, self.chunk_z, self.owner_pubkey)
+    }
+
+    /// Serializes to a wire datagram: `[STATE_TAG] + JSON`.
+    pub fn wire_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(96);
+        out.push(STATE_TAG);
+        out.extend_from_slice(&serde_json::to_vec(self).unwrap_or_default());
+        out
+    }
+
+    /// Parses a wire datagram into a pointer, if it carries one.
+    pub fn from_wire(bytes: &[u8]) -> Option<Self> {
+        if bytes.first() != Some(&STATE_TAG) {
+            return None;
+        }
+        serde_json::from_slice(&bytes[1..]).ok()
+    }
+}
+
+/// Local persistence for the chunks this peer owns (plain JSON files).
+pub struct ChunkStore {
+    dir: PathBuf,
+}
+
+impl ChunkStore {
+    /// A store for `peer_id`, rooted at `CHUNKS_DIR/<peer_id>`.
+    pub fn new(peer_id: &str) -> Self {
+        Self { dir: PathBuf::from(CHUNKS_DIR).join(peer_id) }
+    }
+
+    /// Writes `state` to `chunk_<x>_<z>.json`.
+    pub fn save(&self, state: &ChunkState) -> Result<()> {
+        std::fs::create_dir_all(&self.dir)?;
+        let path = self.dir.join(format!("chunk_{}_{}.json", state.chunk.x, state.chunk.z));
+        std::fs::write(&path, serde_json::to_vec_pretty(state)?)
+            .with_context(|| format!("cannot save chunk state to {}", path.display()))?;
+        Ok(())
+    }
+
+    /// Loads every chunk state this peer has saved.
+    pub fn load_all(&self) -> Result<Vec<ChunkState>> {
+        let mut out = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&self.dir) {
+            for entry in entries.flatten() {
+                if let Ok(bytes) = std::fs::read(entry.path()) {
+                    if let Ok(state) = serde_json::from_slice(&bytes) {
+                        out.push(state);
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Unix milliseconds, used for modification timestamps.
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }

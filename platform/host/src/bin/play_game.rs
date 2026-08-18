@@ -228,9 +228,15 @@ fn main() -> Result<()> {
         bail!("renderer exited with an error: {exit:?}");
     }
 
-    // Graceful shutdown: close the signaling WebSocket and UDP socket before
-    // the process exits so the server observes a clean disconnect.
+    // Graceful shutdown: publish this peer's chunk states to IPFS (so the
+    // world's "ruins" survive its departure), then close the signaling
+    // WebSocket and UDP socket before the process exits.
     let mut guard = store_handle.lock().unwrap();
+    match guard.data_mut().publish_chunk_states() {
+        Ok(n) if n > 0 => println!("[{role}] published {n} chunk state(s) to IPFS"),
+        Ok(_) => {}
+        Err(e) => println!("[{role}] warning: chunk state publish failed: {e}"),
+    }
     if let Some(pc) = guard.data_mut().peer_connection_mut() {
         match pc.shutdown() {
             Ok(_) => println!("[{role}] signaling connection closed cleanly"),

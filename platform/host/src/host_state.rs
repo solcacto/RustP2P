@@ -5,8 +5,9 @@
 //! through `Caller::data()` / `Caller::data_mut()`.
 
 use crate::avatar_state::{AvatarPose, AvatarState};
-use crate::chunk::{ChunkClaim, ChunkCoord, ChunkDht};
+use crate::chunk::{ChunkClaim, ChunkCoord, ChunkDht, ChunkEdit, ChunkState, ChunkStatePointer, ChunkStore};
 use crate::input_state::InputState;
+use crate::ipfs::IpfsClient;
 use crate::peer_connection::PeerConnection;
 use anyhow::Result;
 use std::collections::{HashMap, VecDeque};
@@ -92,6 +93,12 @@ pub struct HostState {
     chunk_registry: Arc<Mutex<ChunkDht>>,
     /// The local peer's own chunk claims (what it hosts for the world).
     owned_chunks: Vec<ChunkCoord>,
+    /// In-memory chunk states this peer owns (persisted locally + to IPFS).
+    chunk_states: HashMap<ChunkCoord, ChunkState>,
+    /// The peer's identity key (`ed25519:<hex>`), part of the IPFS cache key.
+    owner_pubkey: String,
+    /// IPFS node API used for publishing/fetching chunk state.
+    ipfs_api: String,
 }
 
 impl HostState {
@@ -126,6 +133,9 @@ impl HostState {
             avatar_path: "avatar_standard.glb".to_string(),
             chunk_registry: Arc::new(Mutex::new(ChunkDht::new())),
             owned_chunks: Vec::new(),
+            chunk_states: HashMap::new(),
+            owner_pubkey: String::new(),
+            ipfs_api: crate::ipfs::IPFS_API.to_string(),
         }
     }
 
@@ -373,5 +383,116 @@ impl HostState {
     pub fn claim_around_position(&mut self, x: f32, z: f32) -> Result<()> {
         let origin = ChunkCoord::at(x, z);
         self.claim_chunk_region(origin, (2, 1))
+    }
+
+    /// Sets this peer's identity key (`ed25519:<hex>`).
+    pub fn set_owner_pubkey(&mut self, pubkey: impl Into<String>) {
+        self.owner_pubkey = pubkey.into();
+    }
+
+    /// This peer's identity key.
+    pub fn owner_pubkey(&self) -> &str {
+        &self.owner_pubkey
+    }
+
+    /// Sets the IPFS node API used for chunk state (defaults to the local node).
+    pub fn set_ipfs_api(&mut self, api: impl Into<String>) {
+        self.ipfs_api = api.into();
+    }
+
+    /// The IPFS node API this host uses.
+    pub fn ipfs_api(&self) -> &str {
+        &self.ipfs_api
+    }
+
+    /// Records a chunk modification: the owning peer saves it locally (JSON)
+    /// so it can be re-published later.
+    pub fn record_chunk_edit(&mut self, edit: ChunkEdit) -> Result<()> {
+        let coord = ChunkCoord::at(edit.x, edit.z);
+        let state = self.chunk_states.entry(coord).or_insert_with(|| ChunkState {
+            chunk: coord,
+            owner: self.peer_id.clone(),
+            owner_pubkey: self.owner_pubkey.clone(),
+            modified_at: crate::chunk::now_ms(),
+            edits: Vec::new(),
+        });
+        state.apply(edit);
+        ChunkStore::new(&self.peer_id).save(state)
+    }
+
+    /// The chunk states this peer currently owns in memory.
+    pub fn chunk_states(&self) -> &HashMap<ChunkCoord, ChunkState> {
+        &self.chunk_states
+    }
+
+    /// Publishes every locally-saved chunk state to IPFS, records the CIDs in
+    /// the chunk DHT (keyed by chunk coordinate + owner key), and broadcasts a
+    /// state pointer to every peer so they can cache the "ruins" once the
+    /// owner goes offline. Returns how many states were published.
+    pub fn publish_chunk_states(&mut self) -> Result<usize> {
+        let ipfs = IpfsClient::new(self.ipfs_api.clone());
+        let states: Vec<ChunkState> = self.chunk_states.values().cloned().collect();
+        let mut published = 0;
+        for state in &states {
+            let json = serde_json::to_vec(state)?;
+            let cid = ipfs.add_bytes(&json)?;
+            let address = match self.peer_connection() {
+                Some(pc) => pc.local_addr()?,
+                None => "127.0.0.1:0".parse().expect("valid placeholder address"),
+            };
+            self.chunk_registry.lock().unwrap().record_state(
+                state.chunk,
+                cid.clone(),
+                state.owner_pubkey.clone(),
+                state.owner.clone(),
+                address,
+            );
+            let pointer = ChunkStatePointer {
+                peer_id: state.owner.clone(),
+                owner_pubkey: state.owner_pubkey.clone(),
+                chunk_x: state.chunk.x,
+                chunk_z: state.chunk.z,
+                state_cid: cid.clone(),
+            };
+            if let Some(pc) = self.peer_connection() {
+                pc.send_to_all(&pointer.wire_bytes())?;
+            }
+            println!(
+                "[chunk-state] published chunk ({},{}) -> {cid} (key: {})",
+                state.chunk.x,
+                state.chunk.z,
+                pointer.key()
+            );
+            published += 1;
+        }
+        Ok(published)
+    }
+
+    /// Loads a remote chunk's persisted state from IPFS by the CID recorded in
+    /// the chunk DHT — the "ruins" cache, available while the owner is offline.
+    pub fn load_remote_chunk_state(&self, coord: ChunkCoord) -> Result<Option<ChunkState>> {
+        let entry = self.chunk_registry.lock().unwrap().get(coord).cloned();
+        let Some(cid) = entry.and_then(|e| e.state_cid) else {
+            return Ok(None);
+        };
+        let bytes = IpfsClient::new(self.ipfs_api.clone()).cat(&cid)?;
+        Ok(serde_json::from_slice(&bytes).ok())
+    }
+
+    /// Records a remote chunk-state pointer (received over the mesh) in the
+    /// DHT and warms the local IPFS cache so the state survives the owner's
+    /// departure.
+    pub fn ingest_state_pointer(&mut self, pointer: &ChunkStatePointer, addr: std::net::SocketAddr) {
+        self.chunk_registry.lock().unwrap().record_state(
+            ChunkCoord { x: pointer.chunk_x, z: pointer.chunk_z },
+            pointer.state_cid.clone(),
+            pointer.owner_pubkey.clone(),
+            pointer.peer_id.clone(),
+            addr,
+        );
+        // Warm the cache: fetch + pin now, while the owner may still be online.
+        if let Ok(bytes) = IpfsClient::new(self.ipfs_api.clone()).cat(&pointer.state_cid) {
+            let _ = serde_json::from_slice::<ChunkState>(&bytes);
+        }
     }
 }

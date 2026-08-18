@@ -388,5 +388,76 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<()> {
         },
     )?;
 
+    linker.func_wrap(
+        "env",
+        "save_chunk_state",
+        |mut caller: Caller<'_, HostState>,
+         edit_x: f32,
+         edit_z: f32,
+         kind_ptr: i32,
+         kind_len: i32,
+         value: f32| -> Result<i32> {
+            if kind_ptr < 0 || kind_len < 0 {
+                return Ok(0);
+            }
+            let mem = caller
+                .get_export("memory")
+                .and_then(|e| e.into_memory())
+                .ok_or_else(|| anyhow!("guest has no memory export"))?;
+            let mem_size = mem.data_size(&caller);
+            let kind_end = kind_ptr as usize + kind_len as usize;
+            if kind_end > mem_size {
+                return Ok(0);
+            }
+            let kind = String::from_utf8_lossy(&mem.data(&caller)[kind_ptr as usize..kind_end])
+                .into_owned();
+            let edit = crate::chunk::ChunkEdit { x: edit_x, z: edit_z, kind, value };
+            match caller.data_mut().record_chunk_edit(edit) {
+                Ok(()) => Ok(1),
+                Err(_) => Ok(0),
+            }
+        },
+    )?;
+
+    linker.func_wrap(
+        "env",
+        "publish_chunk_states",
+        |mut caller: Caller<'_, HostState>| -> Result<i32> {
+            let n = caller.data_mut().publish_chunk_states().unwrap_or(0);
+            Ok(n as i32)
+        },
+    )?;
+
+    linker.func_wrap(
+        "env",
+        "load_remote_chunk_state",
+        |mut caller: Caller<'_, HostState>,
+         chunk_x: i32,
+         chunk_z: i32,
+         out_buf: i32,
+         out_len: i32| -> Result<i32> {
+            if out_buf < 0 || out_len < 0 {
+                return Ok(0);
+            }
+            let mem = caller
+                .get_export("memory")
+                .and_then(|e| e.into_memory())
+                .ok_or_else(|| anyhow!("guest has no memory export"))?;
+            let mem_size = mem.data_size(&caller);
+            let out_end = out_buf as usize + out_len as usize;
+            if out_end > mem_size {
+                return Ok(0);
+            }
+            let coord = crate::chunk::ChunkCoord { x: chunk_x, z: chunk_z };
+            let Some(state) = caller.data().load_remote_chunk_state(coord).unwrap_or(None) else {
+                return Ok(0);
+            };
+            let json = serde_json::to_vec(&state).unwrap_or_default();
+            let n = json.len().min(out_len as usize);
+            mem.write(&mut caller, out_buf as usize, &json[..n])?;
+            Ok(1)
+        },
+    )?;
+
     Ok(())
 }

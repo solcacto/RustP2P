@@ -209,6 +209,26 @@ loop, persisted peer-to-peer instead of on a server.
 cargo run -p host --bin chunk_test   # chunk math, claims, DHT, host functions
 ```
 
+### Chunk state persistence
+
+The owning peer's modifications to its chunks are **persisted, not lost when it
+leaves**:
+
+- **Local save** — each chunk edit is recorded and written to JSON
+  (`platform/host/chunks/<peer>/chunk_<x>_<z>.json`) as it happens.
+- **Publish on offline** — on graceful shutdown the owner publishes every
+  chunk state to IPFS, **keyed by chunk coordinate + owner pubkey**, records
+  the CID in the chunk DHT, and broadcasts a state pointer to its peers.
+- **Cached "ruins"** — peers that receive the pointer cache the state while the
+  owner is still online, so the world's ruins survive the owner going offline:
+  `Context::load_remote_chunk_state(x, z)` fetches the persisted state from
+  IPFS even when the owner's node is down.
+
+Host functions: `save_chunk_state`, `publish_chunk_states`,
+`load_remote_chunk_state`. Verify with `cargo run -p host --bin chunk_state_test`
+(and the `--offline CID --ipfs API` mode against a second node to prove
+owner-offline loading).
+
 ## Run the game
 
 Open three terminals.
@@ -427,6 +447,7 @@ cargo run -p host --bin network_wasm_test           # wasm<->wasm messages
 cargo run -p host --bin manifest_test               # manifest validation + hash gate
 cargo run -p host --bin avatar_standard_test        # avatar-standard validation
 cargo run -p host --bin chunk_test                  # spatial chunk math, claims, DHT
+cargo run -p host --bin chunk_state_test            # chunk state persistence + offline ruins*
 cargo run -p host --bin avatar_customization_test    # load_avatar + avatar selection
 cargo run -p host --bin cosmetic_signature_test      # signed cosmetic verification
 cargo run -p host --bin distribution_test            # IPFS publish/fetch round-trip*
@@ -444,6 +465,7 @@ cargo run -p host --bin network_test
 
 `*distribution_test` requires a Kubo/IPFS node running on `127.0.0.1:5001`.
 `†discovery_test` additionally requires the registry server on `127.0.0.1:9002`.
+`chunk_state_test`'s `--offline` mode uses the IPFS swarm (multi-node).
 
 ## Lifecycle & error handling
 
