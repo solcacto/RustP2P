@@ -77,6 +77,14 @@ it.
   pose is accepted (`NaN`/`Inf` are rejected).
 - Unknown or malformed datagrams (wrong length) are dropped.
 
+### Content integrity
+
+- Game packages are pinned by SHA-256 (`wasm_hash` in the manifest); a tampered
+  wasm is refused before it runs.
+- Cosmetic packages carry an ed25519 signature over
+  `item_id | attachment_point | sha256(mesh)`; tampered cosmetics (manifest or
+  mesh) fail verification and are **silently not rendered**.
+
 ---
 
 ## What the sandbox does NOT guarantee

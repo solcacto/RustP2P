@@ -1,0 +1,7 @@
+{
+  "attachment_point": "Head",
+  "creator_pubkey": "ed25519:d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+  "item_id": "simple_hat_v1",
+  "mesh": "hat.glb",
+  "signature": "ed25519_sig:cca4f106e5398406f8b217ab1d656739fb3076784a337e07fc7d6e8684aa1984d6ea9e306aad024c16f7016de2be61336a04564f860c528b7e88f5a6d0f9a507"
+}

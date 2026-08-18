@@ -46,9 +46,35 @@ can be attached:
 | `RightFoot` | right ankle/sole |
 
 The host slots cosmetic meshes onto these nodes at runtime (`--cosmetic
-<Point>:<kind>`, e.g. `Head:hat` or `RightHand:sword`). A cosmetic is parented
-to its attachment node, so it inherits the avatar's transform and moves with
-it. Cosmetics are attached to both the local and the remote avatar.
+<manifest>`). Each cosmetic is a **signed package** — the host verifies the
+creator's ed25519 signature before rendering it.
+
+### Signed cosmetic packages
+
+A cosmetic package is a directory under `assets/cosmetics/<item_id>/`
+containing a mesh `.glb` and a `cosmetic_manifest.json`:
+
+```json
+{
+  "item_id": "golden_sword_v1",
+  "mesh": "sword.glb",
+  "attachment_point": "RightHand",
+  "creator_pubkey": "ed25519:xyz...",
+  "signature": "ed25519_sig:abc..."
+}
+```
+
+- `creator_pubkey` is the creator's ed25519 public key (`ed25519:` + 64 hex).
+- `signature` is the creator's ed25519 signature over the canonical message
+  `item_id | attachment_point | sha256(mesh)` (`ed25519_sig:` + 128 hex), so it
+  binds both the manifest identity **and** the mesh content.
+- The host verifies with `ed25519-dalek`; if the signature is invalid (tampered
+  manifest or mesh), the cosmetic is **silently not rendered**.
+
+The reference cosmetics (signed with the platform dev key) live in
+`assets/cosmetics/golden_sword` and `assets/cosmetics/simple_hat`. Create your
+own with `cargo run -p host --bin make_cosmetic`, and validate with
+`cargo run -p host --bin cosmetic_signature_test`.
 
 ## Animations
 

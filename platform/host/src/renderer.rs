@@ -138,27 +138,21 @@ impl AttachmentPoint {
     }
 }
 
-/// Built-in cosmetic meshes the host can slot onto attachment points.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CosmeticKind {
-    Hat,
-    Sword,
+/// A verified cosmetic slot: the signed mesh (glb) to parent onto an
+/// attachment point. Only signature-verified packages reach the renderer.
+#[derive(Debug, Clone)]
+pub struct CosmeticSlot {
+    /// The cosmetic's stable item id (from its manifest).
+    pub item_id: String,
+    /// Mesh path relative to the host asset folder (e.g.
+    /// `cosmetics/golden_sword/sword.glb`).
+    pub mesh_asset_path: String,
 }
 
-impl CosmeticKind {
-    /// Parses a cosmetic by name.
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "hat" => Some(Self::Hat),
-            "sword" => Some(Self::Sword),
-            _ => None,
-        }
-    }
-}
-
-/// Cosmetic slots the host attaches to avatar attachment points.
+/// Cosmetic slots the host attaches to avatar attachment points. Cosmetics in
+/// this list have already passed signature verification.
 #[derive(Resource, Clone, Default)]
-pub struct CosmeticSlots(pub Vec<(AttachmentPoint, CosmeticKind)>);
+pub struct CosmeticSlots(pub Vec<(AttachmentPoint, CosmeticSlot)>);
 
 /// Marker identifying a cosmetic mesh entity parented to an attachment point.
 #[derive(Component)]
@@ -569,44 +563,40 @@ type AvatarRoots<'w, 's> = Query<'w, 's, Entity, Or<(With<Avatar>, With<RemoteAv
 
 /// Slots cosmetic meshes onto the avatar's named attachment points.
 ///
-/// Runs each frame so it picks up attachment nodes as they appear after the
+/// Each slot is a **verified** cosmetic package; the mesh glb is spawned as a
+/// child of its attachment node so it inherits the avatar's transform. Runs
+/// each frame so it picks up attachment nodes as they appear after the
 /// asynchronous glb scene load, and tracks already-attached cosmetics so each
 /// slot is applied exactly once per avatar.
-#[allow(clippy::type_complexity)]
 fn attach_cosmetics(
     mut commands: Commands,
     avatars: AvatarRoots,
     tree: Query<(Option<&Children>, Option<&Name>)>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    asset_server: Res<AssetServer>,
     slots: Res<CosmeticSlots>,
-    mut attached: Local<Vec<(Entity, AttachmentPoint, CosmeticKind)>>,
+    mut attached: Local<Vec<(Entity, AttachmentPoint, String)>>,
 ) {
     if slots.0.is_empty() {
         return;
     }
     for root in &avatars {
-        for (point, kind) in &slots.0 {
-            let key = (root, *point, *kind);
+        for (point, slot) in &slots.0 {
+            let key = (root, *point, slot.item_id.clone());
             if attached.contains(&key) {
                 continue;
             }
             let Some(attach_node) = find_named_node(root, point.as_str(), &tree) else {
                 continue; // scene not fully spawned yet; retry next frame
             };
-            let mesh = cosmetic_mesh(&mut meshes, *kind);
-            let material = cosmetic_material(&mut materials, *kind);
+            let scene = asset_server.load(GltfAssetLabel::Scene(0).from_asset(slot.mesh_asset_path.clone()));
             commands.entity(attach_node).with_children(|parent| {
-                parent.spawn((
-                    MaterialMeshBundle {
-                        mesh: mesh.clone(),
-                        material: material.clone(),
-                        ..default()
-                    },
-                    Cosmetic,
-                ));
+                parent.spawn((SceneBundle { scene, ..default() }, Cosmetic));
             });
-            println!("[cosmetic] attached {:?} to attachment point '{}'", kind, point.as_str());
+            println!(
+                "[cosmetic] attached '{}' to attachment point '{}'",
+                slot.item_id,
+                point.as_str()
+            );
             attached.push(key);
         }
     }
@@ -632,30 +622,6 @@ fn find_named_node(
         }
     }
     None
-}
-
-/// Builds the mesh for a cosmetic kind.
-fn cosmetic_mesh(meshes: &mut Assets<Mesh>, kind: CosmeticKind) -> Handle<Mesh> {
-    match kind {
-        CosmeticKind::Hat => meshes.add(Cuboid::new(0.22, 0.12, 0.22)),
-        CosmeticKind::Sword => meshes.add(Cuboid::new(0.06, 1.0, 0.06)),
-    }
-}
-
-/// Builds the material for a cosmetic kind.
-fn cosmetic_material(
-    materials: &mut Assets<StandardMaterial>,
-    kind: CosmeticKind,
-) -> Handle<StandardMaterial> {
-    let color = match kind {
-        CosmeticKind::Hat => Color::srgb_u8(200, 60, 40),
-        CosmeticKind::Sword => Color::srgb_u8(200, 200, 220),
-    };
-    materials.add(StandardMaterial {
-        base_color: color,
-        perceptual_roughness: 0.4,
-        ..default()
-    })
 }
 
 /// Spawns, updates, and despawns remote avatar entities from the shared pose

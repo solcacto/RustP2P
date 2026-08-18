@@ -1,0 +1,7 @@
+{
+  "attachment_point": "RightHand",
+  "creator_pubkey": "ed25519:d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+  "item_id": "golden_sword_v1",
+  "mesh": "sword.glb",
+  "signature": "ed25519_sig:14ae42f677e2ac9f2ea43383f98eb95156a7c9bc74d581962c3b48248df540f1854fc0c35f18c87a352f0470cb640ca38832337302fa39059f13ae5e23593e02"
+}

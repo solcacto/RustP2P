@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use host::{
     avatar_state::{AvatarPose, AvatarState},
     avatar_standard,
+    cosmetic,
     host_functions,
     host_state::HostState,
     manifest::GameManifest,
@@ -31,7 +32,7 @@ fn main() -> Result<()> {
         .map(|i| args[i + 1].clone())
         .unwrap_or_else(|| "A".to_string());
     if role != "A" && role != "B" {
-        bail!("usage: play_game --role A|B [--avatar <path>] [--cosmetic <Point>:<kind>] [--auto] [--frames N] [--no-exit]");
+        bail!("usage: play_game --role A|B [--avatar <path>] [--cosmetic <manifest>] [--auto] [--frames N] [--no-exit]");
     }
     let local_id = format!("Peer{role}");
     let remote_id = if role == "A" { "PeerB" } else { "PeerA" };
@@ -51,16 +52,16 @@ fn main() -> Result<()> {
         .and_then(|i| args.get(i + 1))
         .cloned()
         .unwrap_or_else(|| "avatar_standard.glb".to_string());
-    // Cosmetic slots, repeatable: --cosmetic <Point>:<kind>, e.g. Head:hat.
-    let cosmetics: Vec<(renderer::AttachmentPoint, renderer::CosmeticKind)> = args
+    // Cosmetic slots, repeatable: --cosmetic <manifest path> (relative to the
+    // host asset folder), e.g. cosmetics/golden_sword/cosmetic_manifest.json.
+    // Only signature-verified cosmetics are slotted; invalid ones are silently
+    // not rendered.
+    let cosmetic_args: Vec<String> = args
         .iter()
         .enumerate()
         .filter(|(_, a)| a.as_str() == "--cosmetic")
         .filter_map(|(i, _)| args.get(i + 1))
-        .filter_map(|spec| {
-            let (point, kind) = spec.split_once(':')?;
-            Some((renderer::AttachmentPoint::parse(point)?, renderer::CosmeticKind::parse(kind)?))
-        })
+        .cloned()
         .collect();
 
     // Shared pose bridges between the Wasm guest, the network poll, and Bevy.
@@ -100,9 +101,40 @@ fn main() -> Result<()> {
         avatar_report.texture_count,
         avatar_report.animations.len()
     );
+    let mut cosmetics: Vec<(renderer::AttachmentPoint, renderer::CosmeticSlot)> = Vec::new();
+    for manifest_rel in &cosmetic_args {
+        match cosmetic::verify_package(AVATAR_ASSET_DIR, manifest_rel) {
+            Ok(pkg) => {
+                let Some(point) = renderer::AttachmentPoint::parse(&pkg.manifest.attachment_point)
+                else {
+                    println!(
+                        "[{role}] cosmetic '{}' rejected: unknown attachment point '{}'",
+                        pkg.manifest.item_id, pkg.manifest.attachment_point
+                    );
+                    continue;
+                };
+                cosmetics.push((
+                    point,
+                    renderer::CosmeticSlot {
+                        item_id: pkg.manifest.item_id.clone(),
+                        mesh_asset_path: pkg.mesh_asset_path.clone(),
+                    },
+                ));
+                println!(
+                    "[{role}] cosmetic '{}' verified (signature OK) -> {}",
+                    pkg.manifest.item_id, pkg.manifest.attachment_point
+                );
+            }
+            Err(e) => {
+                // Signature invalid (tampered manifest or mesh): the cosmetic
+                // is silently not rendered — the host just logs the rejection.
+                println!("[{role}] cosmetic '{manifest_rel}' rejected (not rendered): {e:#}");
+            }
+        }
+    }
     let cosmetic_desc: Vec<String> = cosmetics
         .iter()
-        .map(|(p, k)| format!("{}:{:?}", p.as_str(), k))
+        .map(|(p, s)| format!("{}:{}", p.as_str(), s.item_id))
         .collect();
     println!("[{role}] cosmetics: {}", if cosmetic_desc.is_empty() { "none".to_string() } else { cosmetic_desc.join(", ") });
 

@@ -78,6 +78,7 @@ Key properties:
 │   │       ├── avatar_state.rs / input_state.rs / input_poller.rs
 │   │       ├── assets/avatar_standard.glb  # The standardized reference avatar
 │   │       ├── assets/avatars/blue.glb     # A second validated avatar variant
+│   │       ├── assets/cosmetics/           # Signed cosmetic packages
 │   │       ├── src/bin/            # play_game + framework tests/tools
 │   │       └── src/test_modules/   # WAT test guests (security/network/render)
 │   └── signaling_server/      # WebSocket discovery server
@@ -169,15 +170,27 @@ the two avatars come within **2.0 units** of each other.
 
 The avatar is loaded from a configurable path (relative to the host asset
 folder) and validated against the avatar standard before the game starts, and
-the guest can change it at runtime through `load_avatar`. Cosmetic meshes slot
-onto the avatar's attachment points:
+the guest can change it at runtime through `load_avatar`. Cosmetics are
+**signed packages**: the host verifies the creator's ed25519 signature over the
+manifest + mesh before rendering, and silently skips invalid ones.
 
 ```sh
-# player A: default avatar with a hat on the head
-cargo run -p host --bin play_game -- --role A --cosmetic Head:hat
+# player A: default avatar, verified golden sword on the right hand
+cargo run -p host --bin play_game -- --role A \
+  --cosmetic cosmetics/golden_sword/cosmetic_manifest.json
 
-# player B: a different, blue avatar wielding a sword
-cargo run -p host --bin play_game -- --role B --avatar avatars/blue.glb --cosmetic RightHand:sword
+# player B: a different, blue avatar with a signed hat on the head
+cargo run -p host --bin play_game -- --role B \
+  --avatar avatars/blue.glb \
+  --cosmetic cosmetics/simple_hat/cosmetic_manifest.json
+```
+
+Author a cosmetic package (generates the mesh glb + signs it):
+
+```sh
+cargo run -p host --bin make_cosmetic -- \
+  --kind sword --item my_sword_v1 --point RightHand \
+  --out assets/cosmetics/my_sword
 ```
 
 ### Headless / automated verification
@@ -209,6 +222,7 @@ cargo run -p host --bin network_wasm_test           # wasm<->wasm messages
 cargo run -p host --bin manifest_test               # manifest validation + hash gate
 cargo run -p host --bin avatar_standard_test        # avatar-standard validation
 cargo run -p host --bin avatar_customization_test    # load_avatar + avatar selection
+cargo run -p host --bin cosmetic_signature_test      # signed cosmetic verification
 cargo run -p host --bin trap_test                   # graceful handling of wasm traps
 cargo run -p host --bin render_test                 # 3D scene + wasm-driven pose
 cargo run -p host --bin multiplayer_test -- --role A   # needs 2 terminals
