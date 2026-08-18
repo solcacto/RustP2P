@@ -1,0 +1,14 @@
+[package]
+name = "studio"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = "1"
+hex = "0.4"
+host = { path = "../host" }
+registry_server = { path = "../registry_server" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tiny_http = "0.12"

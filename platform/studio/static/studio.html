@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>RustP2P Studio</title>
+<link rel="stylesheet" data-name="vs/editor/editor.main" href="https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs/editor/editor.main.min.css">
+<style>
+  body { margin:0; font-family: system-ui, sans-serif; background:#1e1e2e; color:#eee; }
+  #topbar { display:flex; gap:10px; align-items:center; padding:8px 12px; background:#2a2a3a; border-bottom:1px solid #444; }
+  #topbar h1 { font-size:16px; margin:0 12px 0 0; }
+  button { padding:6px 14px; border:0; border-radius:6px; cursor:pointer; font-size:13px; }
+  #compile { background:#4c8bf5; color:#fff; }
+  #publish { background:#2f9e44; color:#fff; }
+  #main { display:flex; height:calc(100vh - 46px); }
+  #editorWrap { width:50%; height:100%; }
+  #right { width:50%; display:flex; flex-direction:column; }
+  #previewWrap { flex:1; position:relative; }
+  #preview { width:100%; height:100%; border:0; background:#111; }
+  #status { height:150px; overflow:auto; padding:8px; font-family: monospace; font-size:12px; background:#14141f; border-top:1px solid #444; white-space:pre-wrap; }
+  #cid { color:#7bd88f; }
+</style>
+</head>
+<body>
+<div id="topbar">
+  <h1>RustP2P Studio</h1>
+  <button id="compile">Compile &amp; Preview</button>
+  <button id="publish">Publish to IPFS</button>
+  <span id="games"></span>
+</div>
+<div id="main">
+  <div id="editorWrap"></div>
+  <div id="right">
+    <div id="previewWrap">
+      <iframe id="preview" sandbox="allow-scripts" title="game preview"></iframe>
+    </div>
+    <div id="status">Ready.</div>
+  </div>
+</div>
+
+<script>
+var require = { paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs' } };
+</script>
+<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs/loader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.45.0/min/vs/editor/editor.main.js"></script>
+<script>
+const DEFAULT_SOURCE = `use guest_sdk::prelude::*;
+
+const SPEED: f32 = 0.05;
+const TAG_DISTANCE: f32 = 2.0;
+
+pub struct StudioGame {
+    x: f32,
+    z: f32,
+    rot_y: f32,
+    score: u32,
+}
+
+impl Game for StudioGame {
+    fn new() -> Self {
+        Self { x: 0.0, z: 0.0, rot_y: 0.0, score: 0 }
+    }
+
+    fn tick(&mut self, ctx: &mut Context) {
+        let input = ctx.input();
+        if input.up { self.z -= SPEED; }
+        if input.down { self.z += SPEED; }
+        if input.left { self.x -= SPEED; }
+        if input.right { self.x += SPEED; }
+        if input.action_1 { self.rot_y += 0.1; }
+
+        ctx.set_avatar_transform(self.x, 0.0, self.z, self.rot_y);
+        ctx.broadcast_pose(self.x, 0.0, self.z, self.rot_y);
+
+        // Tag the mock remote player when close.
+        if let Some(remote) = ctx.remote_pose("PeerB") {
+            let dx = self.x - remote.x;
+            let dz = self.z - remote.z;
+            if dx * dx + dz * dz < TAG_DISTANCE * TAG_DISTANCE {
+                self.score = self.score.saturating_add(1);
+                ctx.set_tag_score(self.score);
+            }
+        }
+    }
+}
+
+#[export(StudioGame)]
+fn game_tick() {}
+`;
+
+let editor = monaco.editor.create(document.getElementById('editorWrap'), {
+  value: DEFAULT_SOURCE,
+  language: 'rust',
+  theme: 'vs-dark',
+  automaticLayout: true,
+  minimap: { enabled: false }
+});
+
+const status = document.getElementById('status');
+const log = (s) => { status.textContent += s + '\n'; status.scrollTop = status.scrollHeight; };
+
+const source = () => editor.getValue();
+
+async function compile() {
+  log('compiling...');
+  const res = await fetch('/api/compile', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source: source(), name: 'StudioGame' })
+  });
+  const json = await res.json();
+  if (!json.ok) { log('✗ ' + json.log); return null; }
+  log('✓ compiled (' + json.size + ' bytes), session ' + json.session);
+  return json.session;
+}
+
+document.getElementById('compile').onclick = async () => {
+  const session = await compile();
+  if (session) document.getElementById('preview').src = '/preview.html?session=' + session;
+};
+
+document.getElementById('publish').onclick = async () => {
+  const session = await compile();
+  if (!session) return;
+  log('publishing to IPFS...');
+  const res = await fetch('/api/publish', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source: source(), name: 'StudioGame', description: 'Made in the Studio' })
+  });
+  const json = await res.json();
+  if (json.ok) { log('✓ published: CID <span id="cid">' + json.cid + '</span>'); }
+  else { log('✗ ' + json.cid); }
+};
+
+async function loadGames() {
+  try {
+    const res = await fetch('/api/games');
+    const games = await res.json();
+    document.getElementById('games').textContent = games.length
+      ? ' | ' + games.map(g => g.name + ' (' + g.cid.slice(0, 12) + '…)').join(', ')
+      : '';
+  } catch (e) {}
+}
+loadGames();
+</script>
+</body>
+</html>

@@ -90,6 +90,7 @@ Key properties:
 │   └── signaling_server/      # WebSocket discovery server
 │   └── registry_server/       # Lightweight game registry (only central component)
 │   └── platform-cli/          # platform build/test/publish/run pipeline
+│   └── studio/                # The Web-Based Studio (Monaco + Three.js preview)
 ├── docs/
 │   ├── AVATAR_STANDARD.md     # The Universal Avatar standard
 │   ├── GAME_MANIFEST.md       # game_manifest.json format + validation
@@ -166,6 +167,25 @@ SDK games scaffolded into `platform/games/` work too), `--signer <hex>` picks th
 publisher signing key (default: the platform dev key), and `platform run`
 forwards its arguments to `play_game`. Built manifests carry the publisher's
 ed25519 signature, which the host verifies on load.
+
+## The Web-Based Studio
+
+A browser IDE for non-Rust developers — the decentralized "Roblox Studio".
+
+```sh
+cargo run -p studio          # opens http://127.0.0.1:9003
+```
+
+The Studio (Monaco editor) loads a starter game template. **Compile & Preview**
+sends the Rust source to the server, which compiles it to wasm with the *real*
+toolchain (the guest SDK), then runs it in a **sandboxed iframe** (`sandbox="allow-scripts"`)
+where a small Three.js runtime implements the host functions in JavaScript and
+renders the avatar live — edit, save, see it move. **Publish to IPFS** compiles,
+bundles (manifest + wasm), pins the bundle on IPFS, and registers the CID in
+the discovery registry with one click.
+
+Server endpoints: `POST /api/compile`, `GET /api/preview-wasm?session=<id>`,
+`POST /api/publish`, `GET /api/games`.
 
 ## Run the game
 

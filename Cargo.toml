@@ -8,6 +8,7 @@ members = [
     "platform/guest-sdk-macros",
     "platform/registry_server",
     "platform/signaling_server",
+    "platform/studio",
 ]
 
 [workspace.package]

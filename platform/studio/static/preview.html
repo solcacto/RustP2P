@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Studio Preview</title>
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<style>
+  body { margin:0; overflow:hidden; background:#101018; font-family:system-ui; }
+  #hud { position:absolute; top:8px; left:8px; color:#fff; background:rgba(0,0,0,.5); padding:4px 8px; border-radius:6px; font-size:14px; }
+  #err { position:absolute; top:40px; left:8px; color:#f77; font-family:monospace; font-size:12px; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<div id="hud">Score: 0</div>
+<div id="err"></div>
+<script>
+const session = new URLSearchParams(location.search).get('session') || '';
+
+// ---- three.js scene ----
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x101018);
+const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(0, 3.2, 7);
+camera.lookAt(0, 0.9, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+scene.add(new THREE.HemisphereLight(0xffffff, 0x444455, 1));
+scene.add(new THREE.DirectionalLight(0xffffff, 1));
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(20, 20),
+  new THREE.MeshStandardMaterial({ color: 0x333344 })
+);
+ground.rotation.x = -Math.PI/2;
+scene.add(ground);
+
+function makeAvatar(color) {
+  const g = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial({ color });
+  const add = (w,h,d,x,y,z) => {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w,h,d), mat);
+    m.position.set(x,y,z); g.add(m);
+  };
+  add(0.34, 0.6, 0.22, 0, 1.35, 0);   // torso
+  add(0.26, 0.26, 0.26, 0, 1.85, 0);  // head
+  add(0.4, 0.12, 0.12, -0.28, 1.55, 0); // left arm
+  add(0.4, 0.12, 0.12, 0.28, 1.55, 0);  // right arm
+  add(0.14, 0.5, 0.16, -0.09, 0.75, 0); // left leg
+  add(0.14, 0.5, 0.16, 0.09, 0.75, 0);  // right leg
+  return g;
+}
+const local = makeAvatar(0x8899bb);
+scene.add(local);
+const remote = makeAvatar(0x4488ff);
+remote.position.set(3, 0, 0);
+scene.add(remote);
+
+// ---- input ----
+const keys = {};
+window.addEventListener('keydown', e => { keys[e.code] = true; });
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+// ---- host-function shim (the wasm's `env` module) ----
+let frame = 0;
+let avatar = { x: 0, y: 0, z: 0, ry: 0 };
+let score = 0;
+let memory = null;
+const hud = document.getElementById('hud');
+const err = document.getElementById('err');
+
+const env = {
+  get_frame_count: () => frame,
+  get_input_move_up: () => (keys['KeyW'] ? 1 : 0),
+  get_input_move_down: () => (keys['KeyS'] ? 1 : 0),
+  get_input_move_left: () => (keys['KeyA'] ? 1 : 0),
+  get_input_move_right: () => (keys['KeyD'] ? 1 : 0),
+  get_input_action_1: () => (keys['Space'] ? 1 : 0),
+  get_input_action_2: () => (keys['ShiftLeft'] || keys['ShiftRight'] ? 1 : 0),
+  get_input_gamepad_connected: () => 0,
+  get_input_gamepad_axis_x: () => 0,
+  get_input_gamepad_axis_y: () => 0,
+  send_network_message: () => 0,
+  receive_network_message: () => 0,
+  update_avatar_transform: (x, y, z, ry) => { avatar = { x, y, z, ry }; },
+  broadcast_avatar_pose: () => {},
+  get_remote_avatar_pose: (peerPtr, peerLen, outPtr) => {
+    // Simulate the remote player's latest pose (16 bytes of LE f32).
+    try {
+      const view = new DataView(memory.buffer);
+      view.setFloat32(outPtr, remote.position.x, true);
+      view.setFloat32(outPtr + 4, 0, true);
+      view.setFloat32(outPtr + 8, remote.position.z, true);
+      view.setFloat32(outPtr + 12, 0, true);
+      return 1;
+    } catch (e) { return 0; }
+  },
+  get_movement_axis: () => 0,
+  set_tag_score: (s) => { score = s; hud.textContent = 'Score: ' + s; },
+  broadcast_tag_score: () => {},
+  load_avatar: () => 1,
+};
+
+async function boot() {
+  if (!session) { err.textContent = 'no session'; return; }
+  const res = await fetch('/api/preview-wasm?session=' + session);
+  if (!res.ok) { err.textContent = 'preview-wasm not found'; return; }
+  const bytes = await res.arrayBuffer();
+  const { instance } = await WebAssembly.instantiate(bytes, { env });
+  memory = instance.exports.memory;
+  const tick = instance.exports.game_tick;
+
+  renderer.setAnimationLoop(() => {
+    frame += 1;
+    tick();
+    local.position.set(avatar.x, avatar.y, avatar.z);
+    local.rotation.y = avatar.ry;
+    // A gentle mock remote drift so tagging can happen.
+    remote.position.x = 3 + Math.sin(frame / 90) * 1.2;
+    renderer.render(scene, camera);
+  });
+}
+boot().catch(e => { err.textContent = String(e); });
+</script>
+</body>
+</html>

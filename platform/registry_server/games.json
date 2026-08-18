@@ -12,5 +12,12 @@
     "description": "Chase Tag via platform CLI",
     "author": "solcacto",
     "mode": "session"
+  },
+  {
+    "name": "Studio Shooter",
+    "cid": "QmdTR8UdJsw7QrdvQXAxc1hNCpsjq6tpmLNGiPXmMbkfwt",
+    "description": "Made in the Studio",
+    "author": "studio",
+    "mode": "session"
   }
 ]
