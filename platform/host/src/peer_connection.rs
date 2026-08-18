@@ -136,6 +136,29 @@ impl PeerConnection {
         out
     }
 
+    /// Drains all pending UDP datagrams, preserving each sender's address.
+    pub fn poll_incoming_from(&self) -> Vec<(SocketAddr, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut buf = [0u8; 65536];
+        while let Ok((len, addr)) = self.udp.recv_from(&mut buf) {
+            out.push((addr, buf[..len].to_vec()));
+        }
+        out
+    }
+
+    /// Broadcasts `data` to every currently known peer.
+    pub fn send_to_all(&self, data: &[u8]) -> Result<()> {
+        for addr in self.peers.values() {
+            self.udp.send_to(data, addr)?;
+        }
+        Ok(())
+    }
+
+    /// Reverse-looks up a known peer by its socket address.
+    pub fn peer_id_for_addr(&self, addr: &SocketAddr) -> Option<&String> {
+        self.peers.iter().find(|(_, a)| *a == addr).map(|(id, _)| id)
+    }
+
     fn send_signal(&mut self, v: &Value) -> Result<()> {
         self.ws.send(Message::text(v.to_string()))?;
         Ok(())

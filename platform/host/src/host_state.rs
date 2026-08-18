@@ -1,7 +1,7 @@
-use crate::avatar_state::AvatarState;
+use crate::avatar_state::{AvatarPose, AvatarState};
 use crate::input_state::InputState;
 use crate::peer_connection::PeerConnection;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -18,6 +18,10 @@ pub struct HostState {
     connected_peers: Vec<String>,
     incoming_messages: VecDeque<Vec<u8>>,
     avatar_state: Option<Arc<Mutex<AvatarState>>>,
+    /// Latest pose of every remote peer's avatar, shared with the renderer.
+    remote_avatars: Arc<Mutex<HashMap<String, AvatarPose>>>,
+    /// Local movement axis: 0 = X (role A), 1 = Z (role B).
+    movement_axis: u8,
 }
 
 impl HostState {
@@ -36,6 +40,8 @@ impl HostState {
             connected_peers: Vec::new(),
             incoming_messages: VecDeque::new(),
             avatar_state: None,
+            remote_avatars: Arc::new(Mutex::new(HashMap::new())),
+            movement_axis: 0,
         }
     }
 
@@ -120,5 +126,21 @@ impl HostState {
 
     pub fn avatar_state(&self) -> Option<&Arc<Mutex<AvatarState>>> {
         self.avatar_state.as_ref()
+    }
+
+    pub fn set_remote_avatars(&mut self, map: Arc<Mutex<HashMap<String, AvatarPose>>>) {
+        self.remote_avatars = map;
+    }
+
+    pub fn remote_avatars(&self) -> &Arc<Mutex<HashMap<String, AvatarPose>>> {
+        &self.remote_avatars
+    }
+
+    pub fn set_movement_axis(&mut self, axis: u8) {
+        self.movement_axis = axis;
+    }
+
+    pub fn movement_axis(&self) -> u8 {
+        self.movement_axis
     }
 }

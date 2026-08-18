@@ -1,5 +1,11 @@
 use anyhow::{bail, Result};
-use host::{avatar_state::AvatarState, host_functions, host_state::HostState, renderer};
+use host::{
+    avatar_state::{AvatarPose, AvatarState},
+    host_functions,
+    host_state::HostState,
+    renderer,
+};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use wasmtime::{Engine, Linker, Module, Store};
 
@@ -8,6 +14,8 @@ use wasmtime::{Engine, Linker, Module, Store};
 fn main() -> Result<()> {
     // Shared pose bridge between the Wasm host function and the Bevy scene.
     let avatar_state = Arc::new(Mutex::new(AvatarState::default()));
+    let remote_avatars: Arc<Mutex<HashMap<String, AvatarPose>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 
     // Instantiate the Wasm render module.
     let engine = Engine::default();
@@ -22,7 +30,7 @@ fn main() -> Result<()> {
 
     // Build the Bevy renderer and give it the Wasm runtime so one guest tick
     // runs per rendered frame.
-    let mut app = renderer::build_app(avatar_state.clone());
+    let mut app = renderer::build_app(avatar_state.clone(), remote_avatars.clone());
     let store_handle = Arc::new(Mutex::new(store));
     app.insert_resource(renderer::WasmRuntime {
         store: store_handle.clone(),

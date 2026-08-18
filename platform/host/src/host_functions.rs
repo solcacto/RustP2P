@@ -177,5 +177,71 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<()> {
         },
     )?;
 
+    linker.func_wrap(
+        "env",
+        "broadcast_avatar_pose",
+        |caller: Caller<'_, HostState>, x: f32, y: f32, z: f32, rot_y: f32| -> Result<()> {
+            if !(x.is_finite() && y.is_finite() && z.is_finite() && rot_y.is_finite()) {
+                return Ok(());
+            }
+            let mut payload = Vec::with_capacity(16);
+            payload.extend_from_slice(&x.to_le_bytes());
+            payload.extend_from_slice(&y.to_le_bytes());
+            payload.extend_from_slice(&z.to_le_bytes());
+            payload.extend_from_slice(&rot_y.to_le_bytes());
+            if let Some(pc) = caller.data().peer_connection() {
+                pc.send_to_all(&payload)?;
+            }
+            Ok(())
+        },
+    )?;
+
+    linker.func_wrap(
+        "env",
+        "get_remote_avatar_pose",
+        |mut caller: Caller<'_, HostState>,
+         peer_id_ptr: i32,
+         peer_id_len: i32,
+         out_pose_ptr: i32| -> Result<i32> {
+            if peer_id_ptr < 0 || peer_id_len < 0 || out_pose_ptr < 0 {
+                return Ok(0);
+            }
+            let mem = caller
+                .get_export("memory")
+                .and_then(|e| e.into_memory())
+                .ok_or_else(|| anyhow!("guest has no memory export"))?;
+            let mem_size = mem.data_size(&caller);
+            let peer_end = peer_id_ptr as usize + peer_id_len as usize;
+            let out_end = out_pose_ptr as usize + 16;
+            if peer_end > mem_size || out_end > mem_size {
+                return Ok(0);
+            }
+            let peer_id = String::from_utf8_lossy(
+                &mem.data(&caller)[peer_id_ptr as usize..peer_end],
+            )
+            .to_string();
+            let remote = caller.data().remote_avatars().clone();
+            let remote = remote.lock().unwrap();
+            let Some(pose) = remote.get(&peer_id) else {
+                return Ok(0);
+            };
+            let mut buf = Vec::with_capacity(16);
+            buf.extend_from_slice(&pose.x.to_le_bytes());
+            buf.extend_from_slice(&pose.y.to_le_bytes());
+            buf.extend_from_slice(&pose.z.to_le_bytes());
+            buf.extend_from_slice(&pose.rot_y.to_le_bytes());
+            mem.write(&mut caller, out_pose_ptr as usize, &buf)?;
+            Ok(1)
+        },
+    )?;
+
+    linker.func_wrap(
+        "env",
+        "get_movement_axis",
+        |caller: Caller<'_, HostState>| -> Result<i32> {
+            Ok(caller.data().movement_axis() as i32)
+        },
+    )?;
+
     Ok(())
 }
