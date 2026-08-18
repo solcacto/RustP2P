@@ -31,7 +31,7 @@ use bevy::sprite::SpritePlugin;
 use bevy::text::{Text, TextStyle, TextPlugin};
 use bevy::transform::TransformPlugin;
 use bevy::ui::{node_bundles::TextBundle, PositionType, Style, UiPlugin, Val};
-use bevy::window::WindowPlugin;
+use bevy::window::{PresentMode, Window, WindowPlugin};
 use bevy::winit::{UpdateMode, WakeUp, WinitPlugin, WinitSettings};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -64,6 +64,19 @@ pub struct RemoteAvatarsHandle(
     /// Map of peer id to the peer's latest received pose.
     pub Arc<Mutex<HashMap<String, AvatarPose>>>,
 );
+
+/// The shared merged avatar mesh — every avatar renders with this single low-poly
+/// mesh so Bevy can batch them into a few draw calls.
+#[derive(Resource, Clone)]
+pub struct AvatarMeshHandle(pub Handle<Mesh>);
+
+/// Shared material for the local avatar (enables draw-call batching).
+#[derive(Resource, Clone)]
+pub struct AvatarMaterialHandle(pub Handle<StandardMaterial>);
+
+/// Shared material for every remote avatar (blue, all instances batched).
+#[derive(Resource, Clone)]
+pub struct RemoteMaterialHandle(pub Handle<StandardMaterial>);
 
 /// Marker identifying the loaded Universal Avatar scene root.
 #[derive(Component)]
@@ -197,7 +210,14 @@ pub fn build_app(
         },
     ));
     app.add_plugins((
-        WindowPlugin::default(),
+        WindowPlugin {
+            primary_window: Some(Window {
+                // No vsync: measure real render cost and allow >60 FPS.
+                present_mode: PresentMode::Immediate,
+                ..default()
+            }),
+            ..default()
+        },
         bevy::a11y::AccessibilityPlugin,
         ScenePlugin,
         WinitPlugin::<WakeUp>::default(),
@@ -212,15 +232,22 @@ pub fn build_app(
         UiPlugin,
     ));
     app.insert_resource(WinitSettings {
-        focused_mode: UpdateMode::reactive(Duration::from_millis(1000 / TARGET_FPS)),
-        unfocused_mode: UpdateMode::reactive_low_power(Duration::from_millis(1000 / TARGET_FPS)),
+        // Continuous updates (focused or not): the game loop isn't throttled
+        // to 60 Hz, so the frame time reflects real rendering cost (target
+        // 120+ FPS) regardless of window focus.
+        focused_mode: UpdateMode::Continuous,
+        unfocused_mode: UpdateMode::Continuous,
     });
     app.insert_resource(AvatarStateHandle(avatar_state));
     app.insert_resource(RemoteAvatarsHandle(remote_avatars));
     app.insert_resource(AutoInput(false));
     app.insert_resource(CosmeticSlots::default());
     app.insert_resource(SharedFrameStats::default());
-    app.add_plugins((FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin::default()));
+    app.add_plugins((
+        FrameTimeDiagnosticsPlugin,
+        LogDiagnosticsPlugin::default(),
+        bevy::render::diagnostic::RenderDiagnosticsPlugin,
+    ));
     app.add_systems(Startup, setup_scene);
     app.add_systems(
         Update,
@@ -232,10 +259,10 @@ pub fn build_app(
             update_chunk_claims,
             zone_transition,
             sync_remote_avatars,
-            tint_remote_avatars,
             attach_cosmetics,
             monitor_signaling,
             measure_rtt,
+            debug_frustum_culling,
             update_hud,
             record_frame_stats,
             exit_after_wasm_error,
@@ -459,6 +486,30 @@ fn record_frame_stats(stats: Res<SharedFrameStats>) {
     }
 }
 
+/// Verifies Bevy's frustum culling: logs how many mesh entities were visible
+/// vs culled, and how many unique materials are in use (a proxy for batching).
+fn debug_frustum_culling(
+    visibility: Query<&ViewVisibility>,
+    materials: Query<&Handle<StandardMaterial>>,
+    frames: Res<FrameCount>,
+) {
+    const LOG_EVERY: u32 = 120;
+    if !frames.0.is_multiple_of(LOG_EVERY) {
+        return;
+    }
+    let total = visibility.iter().len();
+    let visible = visibility.iter().filter(|v| v.get()).count();
+    let material_count = materials.iter().len();
+    let unique_materials: usize = materials.iter().collect::<std::collections::HashSet<_>>().len();
+    tracing::info!(
+        visible,
+        culled = total.saturating_sub(visible),
+        material_entities = material_count,
+        unique_materials,
+        "Frustum culling / batching"
+    );
+}
+
 /// Builds and updates the score/status HUD from host state: scores, peer
 /// connectivity, signaling status, and any Wasm error. The text is logged
 /// whenever it changes so lifecycle transitions are visible in stdout too.
@@ -676,7 +727,8 @@ fn zone_transition(
 fn sync_avatar_scene(
     runtime: Res<WasmRuntime>,
     mut commands: Commands,
-    asset_server: Res<AssetServer>,
+    avatar_mesh: Res<AvatarMeshHandle>,
+    avatar_material: Res<AvatarMaterialHandle>,
     avatars: Query<(Entity, &AvatarSource), With<Avatar>>,
 ) {
     let desired = runtime.store.lock().unwrap().data().avatar_path().to_string();
@@ -686,18 +738,25 @@ fn sync_avatar_scene(
         }
         Some((entity, _)) => {
             commands.entity(entity).despawn();
-            spawn_avatar(&mut commands, &asset_server, desired);
+            spawn_avatar(&mut commands, &avatar_mesh.0, &avatar_material.0, desired);
         }
-        None => spawn_avatar(&mut commands, &asset_server, desired),
+        None => spawn_avatar(&mut commands, &avatar_mesh.0, &avatar_material.0, desired),
     }
 }
 
-/// Spawns the local avatar scene root for `path` (relative to the asset dir).
-fn spawn_avatar(commands: &mut Commands, asset_server: &AssetServer, path: String) {
-    let scene = asset_server.load(GltfAssetLabel::Scene(0).from_asset(path.clone()));
+/// Spawns the local avatar as a single batched mesh entity (one draw call),
+/// mirroring the pose applied by `apply_avatar_pose`.
+fn spawn_avatar(
+    commands: &mut Commands,
+    mesh: &Handle<Mesh>,
+    material: &Handle<StandardMaterial>,
+    path: String,
+) {
     commands.spawn((
-        SceneBundle {
-            scene,
+        MaterialMeshBundle {
+            mesh: mesh.clone(),
+            material: material.clone(),
+            transform: Transform::from_xyz(0.0, 0.0, 0.0),
             ..default()
         },
         Avatar,
@@ -708,17 +767,14 @@ fn spawn_avatar(commands: &mut Commands, asset_server: &AssetServer, path: Strin
 /// Query of every avatar scene root (local or remote).
 type AvatarRoots<'w, 's> = Query<'w, 's, Entity, Or<(With<Avatar>, With<RemoteAvatar>)>>;
 
-/// Slots cosmetic meshes onto the avatar's named attachment points.
+/// Slots cosmetic meshes onto avatar attachment points.
 ///
-/// Each slot is a **verified** cosmetic package; the mesh glb is spawned as a
-/// child of its attachment node so it inherits the avatar's transform. Runs
-/// each frame so it picks up attachment nodes as they appear after the
-/// asynchronous glb scene load, and tracks already-attached cosmetics so each
-/// slot is applied exactly once per avatar.
+/// Avatars are single batched mesh entities, so a cosmetic is parented to the
+/// avatar root at a fixed world offset per attachment point (it inherits the
+/// avatar's transform). Applies each slot exactly once per avatar.
 fn attach_cosmetics(
     mut commands: Commands,
     avatars: AvatarRoots,
-    tree: Query<(Option<&Children>, Option<&Name>)>,
     asset_server: Res<AssetServer>,
     slots: Res<CosmeticSlots>,
     mut attached: Local<Vec<(Entity, AttachmentPoint, String)>>,
@@ -732,12 +788,17 @@ fn attach_cosmetics(
             if attached.contains(&key) {
                 continue;
             }
-            let Some(attach_node) = find_named_node(root, point.as_str(), &tree) else {
-                continue; // scene not fully spawned yet; retry next frame
-            };
+            let offset = attachment_offset(*point);
             let scene = asset_server.load(GltfAssetLabel::Scene(0).from_asset(slot.mesh_asset_path.clone()));
-            commands.entity(attach_node).with_children(|parent| {
-                parent.spawn((SceneBundle { scene, ..default() }, Cosmetic));
+            commands.entity(root).with_children(|parent| {
+                parent.spawn((
+                    SceneBundle {
+                        scene,
+                        transform: Transform::from_translation(offset),
+                        ..default()
+                    },
+                    Cosmetic,
+                ));
             });
             println!(
                 "[cosmetic] attached '{}' to attachment point '{}'",
@@ -749,36 +810,29 @@ fn attach_cosmetics(
     }
 }
 
-/// Depth-first search for a descendant node with the given name.
-fn find_named_node(
-    root: Entity,
-    name: &str,
-    tree: &Query<(Option<&Children>, Option<&Name>)>,
-) -> Option<Entity> {
-    let mut stack = vec![root];
-    while let Some(entity) = stack.pop() {
-        if entity != root {
-            if let Ok((_, Some(node_name))) = tree.get(entity) {
-                if node_name.as_str() == name {
-                    return Some(entity);
-                }
-            }
-        }
-        if let Ok((Some(children), _)) = tree.get(entity) {
-            stack.extend(children.iter().copied());
-        }
+/// World-space offset of each attachment point relative to the avatar root.
+fn attachment_offset(point: AttachmentPoint) -> Vec3 {
+    match point {
+        AttachmentPoint::Head => Vec3::new(0.0, 1.95, 0.0),
+        AttachmentPoint::Chest => Vec3::new(0.0, 1.4, 0.0),
+        AttachmentPoint::LeftHand => Vec3::new(-1.0, 1.5, 0.0),
+        AttachmentPoint::RightHand => Vec3::new(1.0, 1.5, 0.0),
+        AttachmentPoint::Back => Vec3::new(0.0, 1.3, -0.25),
+        AttachmentPoint::LeftFoot => Vec3::new(-0.15, 0.1, 0.03),
+        AttachmentPoint::RightFoot => Vec3::new(0.15, 0.1, 0.03),
     }
-    None
 }
 
 /// Spawns, updates, and despawns remote avatar entities from the shared pose
-/// map: one glb clone per remote peer, tinted blue, mirroring their latest pose
-/// and removed if it stops reporting for more than 2 seconds.
+/// map: one batched mesh entity per remote peer, sharing a single blue
+/// material (so all remotes batch into one draw call), removed if it stops
+/// reporting for more than 2 seconds.
 fn sync_remote_avatars(
     handle: Res<RemoteAvatarsHandle>,
     runtime: Res<WasmRuntime>,
     mut commands: Commands,
-    asset_server: Res<AssetServer>,
+    avatar_mesh: Res<AvatarMeshHandle>,
+    remote_material: Res<RemoteMaterialHandle>,
     mut avatars: Query<(Entity, &RemotePeerId, &mut Transform)>,
 ) {
     let now = Instant::now();
@@ -798,7 +852,6 @@ fn sync_remote_avatars(
         commands.entity(entity).despawn();
     }
 
-    let scene = asset_server.load(GltfAssetLabel::Scene(0).from_asset(avatar_path.clone()));
     for (peer_id, pose) in map.iter() {
         if now.duration_since(pose.last_seen).as_secs_f32() >= 2.0 {
             continue;
@@ -810,8 +863,10 @@ fn sync_remote_avatars(
             }
             None => {
                 commands.spawn((
-                    SceneBundle {
-                        scene: scene.clone(),
+                    MaterialMeshBundle {
+                        mesh: avatar_mesh.0.clone(),
+                        material: remote_material.0.clone(),
+                        transform: Transform::from_translation(Vec3::new(pose.x, pose.y, pose.z)),
                         ..default()
                     },
                     RemoteAvatar,
@@ -819,48 +874,6 @@ fn sync_remote_avatars(
                     AvatarSource(avatar_path.clone()),
                 ));
             }
-        }
-    }
-}
-
-/// Lazily tints every material-bearing descendant of a freshly spawned remote
-/// avatar with a per-entity blue material. Runs each frame so children spawned
-/// by the asynchronous glb scene load are caught, but stops once all currently
-/// present descendants have been tinted.
-fn tint_remote_avatars(
-    mut commands: Commands,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    avatars: Query<Entity, With<RemoteAvatar>>,
-    children: Query<&Children>,
-    material_query: Query<&Handle<StandardMaterial>>,
-    mut done: Local<Vec<Entity>>,
-) {
-    for root in &avatars {
-        if done.contains(&root) {
-            continue;
-        }
-        let mut stack = vec![root];
-        let mut found_material = false;
-        let mut tinted_any = false;
-        while let Some(entity) = stack.pop() {
-            if let Ok(handle) = material_query.get(entity) {
-                found_material = true;
-                let base = materials.get(handle).cloned().unwrap_or_default();
-                let tinted = materials.add(StandardMaterial {
-                    base_color: Color::srgb_u8(90, 140, 255),
-                    ..base
-                });
-                commands.entity(entity).insert(tinted);
-                tinted_any = true;
-            }
-            if let Ok(children) = children.get(entity) {
-                stack.extend(children.iter().copied());
-            }
-        }
-        // Only stop retrying once the scene has fully spawned and yielded a
-        // material (child entities can appear across frames).
-        if found_material && tinted_any {
-            done.push(root);
         }
     }
 }
@@ -888,8 +901,13 @@ fn setup_scene(
         ..default()
     });
 
+    // Single directional light, shadows disabled for speed.
     commands.spawn(DirectionalLightBundle {
-        directional_light: Default::default(),
+        directional_light: DirectionalLight {
+            shadows_enabled: false,
+            illuminance: 8000.0,
+            ..default()
+        },
         transform: Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.7, 0.4, 0.0)),
         ..default()
     });
@@ -904,9 +922,25 @@ fn setup_scene(
         ..default()
     });
 
-    // The local avatar is spawned and hot-swapped by `sync_avatar_scene`,
-    // driven by the avatar path the host (or the guest's `load_avatar`)
-    // selects.
+    // One merged low-poly avatar mesh and two shared materials: every avatar
+    // (local and remote) renders with these, so Bevy batches all of them into
+    // a handful of draw calls.
+    let avatar_mesh = meshes.add(build_avatar_mesh());
+    let local_material = materials.add(StandardMaterial {
+        base_color: Color::srgb_u8(200, 205, 215),
+        perceptual_roughness: 0.55,
+        metallic: 0.0,
+        ..default()
+    });
+    let remote_material = materials.add(StandardMaterial {
+        base_color: Color::srgb_u8(80, 130, 255),
+        perceptual_roughness: 0.55,
+        metallic: 0.0,
+        ..default()
+    });
+    commands.insert_resource(AvatarMeshHandle(avatar_mesh));
+    commands.insert_resource(AvatarMaterialHandle(local_material));
+    commands.insert_resource(RemoteMaterialHandle(remote_material));
 
     commands.spawn((
         TextBundle::from_section(
@@ -925,6 +959,87 @@ fn setup_scene(
         }),
         ScoreText,
     ));
+}
+
+/// Builds the shared low-poly humanoid mesh by merging the avatar's body boxes
+/// into a single indexed mesh, so every avatar is one entity + one draw call.
+fn build_avatar_mesh() -> Mesh {
+    use bevy::render::mesh::{Indices, PrimitiveTopology};
+    use bevy::render::render_asset::RenderAssetUsages;
+
+    // (center, size) of each box making up the humanoid body.
+    const BODY: [([f32; 3], [f32; 3]); 15] = [
+        ([0.0, 1.0, 0.0], [0.3, 0.2, 0.2]),
+        ([0.0, 1.45, 0.0], [0.36, 0.7, 0.22]),
+        ([0.0, 1.98, 0.0], [0.24, 0.28, 0.24]),
+        ([-0.55, 1.6, 0.0], [0.55, 0.13, 0.13]),
+        ([-1.0, 1.6, 0.0], [0.45, 0.11, 0.11]),
+        ([-1.22, 1.6, 0.0], [0.2, 0.1, 0.1]),
+        ([0.55, 1.6, 0.0], [0.55, 0.13, 0.13]),
+        ([1.0, 1.6, 0.0], [0.45, 0.11, 0.11]),
+        ([1.22, 1.6, 0.0], [0.2, 0.1, 0.1]),
+        ([-0.12, 0.72, 0.0], [0.14, 0.55, 0.16]),
+        ([-0.12, 0.32, 0.0], [0.11, 0.4, 0.12]),
+        ([-0.12, 0.06, 0.03], [0.12, 0.1, 0.22]),
+        ([0.12, 0.72, 0.0], [0.14, 0.55, 0.16]),
+        ([0.12, 0.32, 0.0], [0.11, 0.4, 0.12]),
+        ([0.12, 0.06, 0.03], [0.12, 0.1, 0.22]),
+    ];
+
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    for (center, size) in BODY {
+        let (p, n) = box_geometry(center, size);
+        positions.extend(p);
+        normals.extend(n);
+    }
+    let indices: Vec<u32> = (0..positions.len() as u32).collect();
+
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
+/// Flat-shaded box geometry (non-indexed: per-face vertices so normals are flat).
+fn box_geometry(center: [f32; 3], size: [f32; 3]) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
+    let [cx, cy, cz] = center;
+    let (hw, hh, hd) = (size[0] / 2.0, size[1] / 2.0, size[2] / 2.0);
+    let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
+        ([1.0, 0.0, 0.0], [[cx + hw, cy - hh, cz - hd], [cx + hw, cy - hh, cz + hd], [cx + hw, cy + hh, cz + hd], [cx + hw, cy + hh, cz - hd]]),
+        ([-1.0, 0.0, 0.0], [[cx - hw, cy - hh, cz + hd], [cx - hw, cy - hh, cz - hd], [cx - hw, cy + hh, cz - hd], [cx - hw, cy + hh, cz + hd]]),
+        ([0.0, 1.0, 0.0], [[cx - hw, cy + hh, cz - hd], [cx - hw, cy + hh, cz + hd], [cx + hw, cy + hh, cz + hd], [cx + hw, cy + hh, cz - hd]]),
+        ([0.0, -1.0, 0.0], [[cx - hw, cy - hh, cz + hd], [cx - hw, cy - hh, cz - hd], [cx + hw, cy - hh, cz - hd], [cx + hw, cy - hh, cz + hd]]),
+        ([0.0, 0.0, 1.0], [[cx - hw, cy - hh, cz + hd], [cx + hw, cy - hh, cz + hd], [cx + hw, cy + hh, cz + hd], [cx - hw, cy + hh, cz + hd]]),
+        ([0.0, 0.0, -1.0], [[cx + hw, cy - hh, cz - hd], [cx - hw, cy - hh, cz - hd], [cx - hw, cy + hh, cz - hd], [cx + hw, cy + hh, cz - hd]]),
+    ];
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    for (n, corners) in faces {
+        let mut tris = [[corners[0], corners[1], corners[2]], [corners[0], corners[2], corners[3]]];
+        for tri in &mut tris {
+            let u = [tri[1][0] - tri[0][0], tri[1][1] - tri[0][1], tri[1][2] - tri[0][2]];
+            let v = [tri[2][0] - tri[0][0], tri[2][1] - tri[0][1], tri[2][2] - tri[0][2]];
+            let cross = [
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ];
+            if cross[0] * n[0] + cross[1] * n[1] + cross[2] * n[2] < 0.0 {
+                tri.swap(1, 2);
+            }
+        }
+        for tri in tris {
+            positions.push(tri[0]);
+            positions.push(tri[1]);
+            positions.push(tri[2]);
+            normals.push(n);
+            normals.push(n);
+            normals.push(n);
+        }
+    }
+    (positions, normals)
 }
 
 /// Registers the frame-limit terminator used by the integration tests.

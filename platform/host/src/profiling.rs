@@ -87,9 +87,10 @@ impl FrameStats {
         self.samples.iter()
     }
 
-    /// Averages and percentiles for the current set of samples.
+    /// Averages and percentiles for the current set of samples, excluding
+    /// warm-up frames (wasmtime JIT compile, asset loads, window creation).
     pub fn summary(&self) -> TimingSummary {
-        let samples: Vec<&FrameTiming> = self.samples.iter().collect();
+        let samples: Vec<&FrameTiming> = self.samples.iter().skip(WARMUP_FRAMES).collect();
         let avg = |f: fn(&FrameTiming) -> f64| -> f64 {
             if samples.is_empty() {
                 return 0.0;
@@ -107,7 +108,7 @@ impl FrameStats {
         };
         let avg_frame = avg(|s| s.frame_ms);
         TimingSummary {
-            frames: self.frames,
+            frames: self.frames.saturating_sub(WARMUP_FRAMES as u64),
             avg_frame_ms: avg_frame,
             p50_frame_ms: pct(|s| s.frame_ms, 0.50),
             p95_frame_ms: pct(|s| s.frame_ms, 0.95),
@@ -124,6 +125,9 @@ impl FrameStats {
         }
     }
 }
+
+/// Frames to skip in summaries: startup/warm-up (JIT, asset loads, window).
+const WARMUP_FRAMES: usize = 60;
 
 /// Computed averages/percentiles for a run.
 #[derive(Debug, Clone)]

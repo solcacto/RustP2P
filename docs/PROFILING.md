@@ -67,8 +67,25 @@ These catch performance regressions as the platform evolves.
   rendering dominates (>95%), optimization effort belongs in the renderer; if
   Wasm execution grows, look at guest-side work or host-function cost.
 - **Warm-up**: wasmtime compiles the module on first use and the first frames
-  load assets — ignore the first ~10 frames when comparing runs (the report
-  percentiles naturally down-weight outliers, but prefer `p95`/`p99` over the
-  mean for spike analysis).
+  load assets — summaries skip the first 60 frames automatically.
 - **RTT** is measured with ping/pong datagrams (`PeerConnection::ping_all`),
   reported as `PeerStats::avg_rtt_ms`.
+
+## Rendering optimization (Commit 27)
+
+The Commit 26 baseline showed Bevy rendering at ~18.75 ms/frame. The profiling
+data drove the Commit 27 optimizations:
+
+- Avatars render as a **single merged low-poly mesh** (one entity, one draw
+  call) instead of full glb scenes (61 entities each), with **shared
+  materials** (one local, one blue remote) so all avatars batch.
+- **Shadows disabled** and the single directional light kept cheap.
+- **Continuous updates + no vsync** (`WinitSettings::Continuous`,
+  `PresentMode::Immediate`) so the loop isn't capped at 60 Hz.
+- **Render diagnostics** (`RenderDiagnosticsPlugin`) show render passes are
+  ~0.04 ms; a **frustum-culling / batching** debug system logs visible vs
+  culled entities and unique material count.
+
+Result (debug build, Apple M1): average frame time **18.75 ms → 7.9 ms
+(126 FPS)**; only 2 unique materials, ~4 visible entities. The remaining frame
+time is macOS window-server pacing, not render work.

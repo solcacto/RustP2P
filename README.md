@@ -264,8 +264,10 @@ cargo bench -p host
 
 Host functions log a warning when a call exceeds 1 ms, and the P2P layer
 measures round-trip time continuously (`PeerStats`). Baseline (Apple M1,
-debug build): `wasm_game_tick` ≈ 313 ns, `wasm_instantiation` ≈ 492 µs, and
-Bevy rendering dominates the frame.
+debug build): `wasm_game_tick` ≈ 313 ns, `wasm_instantiation` ≈ 492 µs.
+Rendering was optimized in Commit 27 (shared batched avatar mesh + materials,
+continuous updates, vsync off): average frame time dropped from **18.75 ms →
+7.9 ms (126 FPS)**, with only 2 unique materials and ~4 visible entities.
 
 ## Run the game
 
