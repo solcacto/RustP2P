@@ -33,7 +33,7 @@ fn main() -> Result<()> {
         .map(|i| args[i + 1].clone())
         .unwrap_or_else(|| "A".to_string());
     if role != "A" && role != "B" {
-        bail!("usage: play_game --role A|B [--cid <CID>] [--avatar <path>] [--cosmetic <manifest>] [--auto] [--frames N] [--no-exit]");
+        bail!("usage: play_game --role A|B [--cid <CID>] [--ipfs <api>] [--avatar <path>] [--cosmetic <manifest>] [--auto] [--frames N] [--no-exit]");
     }
     let local_id = format!("Peer{role}");
     let remote_id = if role == "A" { "PeerB" } else { "PeerA" };
@@ -51,6 +51,13 @@ fn main() -> Result<()> {
         .position(|a| a == "--cid")
         .and_then(|i| args.get(i + 1))
         .cloned();
+    // IPFS node API to use for downloads (defaults to the local Kubo node).
+    let ipfs_api = args
+        .iter()
+        .position(|a| a == "--ipfs")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .unwrap_or_else(|| host::ipfs::IPFS_API.to_string());
     // Avatar asset path, relative to the host asset folder.
     let avatar_path = args
         .iter()
@@ -79,7 +86,8 @@ fn main() -> Result<()> {
     // guest directory.
     let (package_dir, manifest_path): (std::path::PathBuf, std::path::PathBuf) = match &cid {
         Some(cid) => {
-            let game_dir = fetch_game_from_ipfs(cid)?;
+            let ipfs = host::ipfs::IpfsClient::new(&ipfs_api);
+            let game_dir = fetch_game_from_ipfs(&ipfs, cid)?;
             (game_dir.clone(), game_dir.join("game_manifest.json"))
         }
         None => (
@@ -248,8 +256,9 @@ fn main() -> Result<()> {
 }
 
 /// Fetches a game bundle from IPFS by CID, extracts it into `games/<cid>/`,
-/// and returns the extracted package directory.
-fn fetch_game_from_ipfs(cid: &str) -> Result<std::path::PathBuf> {
+/// pins it (so this node seeds the game for the swarm), and returns the
+/// extracted package directory.
+fn fetch_game_from_ipfs(ipfs: &host::ipfs::IpfsClient, cid: &str) -> Result<std::path::PathBuf> {
     let games_dir = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/games"));
     let game_dir = games_dir.join(cid);
     if game_dir.join("game_manifest.json").exists() {
@@ -258,13 +267,19 @@ fn fetch_game_from_ipfs(cid: &str) -> Result<std::path::PathBuf> {
     }
 
     println!("[{cid}] fetching bundle from IPFS...");
-    let tar_bytes = host::ipfs::cat(cid)?;
+    let tar_bytes = ipfs.cat(cid)?;
     println!("[{cid}] fetched {} bytes", tar_bytes.len());
 
     // Remove any stale extraction and unpack fresh.
     let _ = std::fs::remove_dir_all(&game_dir);
     host::ipfs::extract(&tar_bytes, &game_dir)?;
     println!("[{cid}] extracted game package to {}", game_dir.display());
+
+    // Become a seeder: pin the bundle so this node serves it to the swarm.
+    match ipfs.pin(cid) {
+        Ok(()) => println!("[{cid}] pinned — this node is now a seeder for the game"),
+        Err(e) => println!("[{cid}] warning: could not pin bundle: {e}"),
+    }
     Ok(game_dir)
 }
 

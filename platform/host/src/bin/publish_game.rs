@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use host::ipfs;
+
 use registry_server::{register_game, GameListing};
 use std::path::{Path, PathBuf};
 
@@ -16,6 +16,12 @@ const REGISTRY_URL: &str = "http://127.0.0.1:9002";
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let register = args.iter().any(|a| a == "--register");
+    let ipfs_api = args
+        .iter()
+        .position(|a| a == "--ipfs")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .unwrap_or_else(|| host::ipfs::IPFS_API.to_string());
     let description = args
         .iter()
         .position(|a| a == "--description")
@@ -25,16 +31,17 @@ fn main() -> Result<()> {
 
     let package_dir = PathBuf::from(PACKAGE_DIR);
     let assets_dir = PathBuf::from(ASSETS_DIR);
+    let ipfs = host::ipfs::IpfsClient::new(&ipfs_api);
 
     let manifest: serde_json::Value = serde_json::from_slice(
         &std::fs::read(package_dir.join("game_manifest.json"))?,
     )?;
 
     println!("bundling game package from {}...", package_dir.display());
-    let tar_bytes = ipfs::bundle(&package_dir, &assets_dir)?;
+    let tar_bytes = host::ipfs::bundle(&package_dir, &assets_dir)?;
     println!("bundle: {} bytes", tar_bytes.len());
 
-    let cid = ipfs::add_bytes(&tar_bytes).context("publish failed")?;
+    let cid = ipfs.add_bytes(&tar_bytes).context("publish failed")?;
     println!("✓ published game to IPFS: CID = {cid}");
 
     // Keep a local copy so the bundle can be inspected or re-pinned.

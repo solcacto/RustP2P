@@ -5,58 +5,106 @@
 //! permanent address: any player can fetch the exact same bundle bytes from
 //! the swarm by that CID, so games never depend on a central server.
 //!
-//! Talks to a local Kubo daemon over its HTTP API (`127.0.0.1:5001`) using
-//! `ureq` — no heavy client crate required.
+//! Once a node downloads (and pins) a bundle it becomes a **seeder**: other
+//! players requesting the same CID are served by the swarm — the original
+//! publisher can even go offline (Commit 19).
+//!
+//! Talks to a Kubo daemon over its HTTP API using `ureq` — no heavy client
+//! crate required. The endpoint is configurable so tests can simulate multiple
+//! machines (one node per API port).
 
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::io::Read;
 use std::path::Path;
 
-/// Kubo HTTP API base URL (adjust for a remote node).
+/// Default Kubo HTTP API base URL.
 pub const IPFS_API: &str = "http://127.0.0.1:5001/api/v0";
 
-/// Adds raw bytes to IPFS and returns the resulting CID (e.g. `Qm...`).
-pub fn add_bytes(bytes: &[u8]) -> Result<String> {
-    let boundary = "----rustp2p-bundle-boundary";
-    let mut body = Vec::with_capacity(bytes.len() + 256);
-    body.extend_from_slice(
-        format!(
-            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"bundle.tar\"\r\nContent-Type: application/octet-stream\r\n\r\n"
-        )
-        .as_bytes(),
-    );
-    body.extend_from_slice(bytes);
-    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-
-    let response = ureq::post(&format!("{IPFS_API}/add"))
-        .set("Content-Type", &format!("multipart/form-data; boundary={boundary}"))
-        .send_bytes(&body)
-        .context("IPFS add failed (is a Kubo node running on 127.0.0.1:5001?)")?;
-    let json: Value = serde_json::from_str(&response.into_string()?)
-        .context("unexpected IPFS add response")?;
-    let cid = json["Hash"]
-        .as_str()
-        .context("IPFS add response missing Hash")?
-        .to_string();
-    if cid.is_empty() {
-        bail!("IPFS add returned an empty CID");
-    }
-    Ok(cid)
+/// Client for a specific Kubo node's HTTP API.
+#[derive(Debug, Clone)]
+pub struct IpfsClient {
+    api: String,
 }
 
-/// Fetches the raw bytes stored under `cid` from IPFS.
+impl IpfsClient {
+    /// Creates a client for the node at `api` (e.g.
+    /// `http://127.0.0.1:5001/api/v0`).
+    pub fn new(api: impl Into<String>) -> Self {
+        let mut api = api.into();
+        if !api.ends_with("/api/v0") {
+            api = format!("{}/api/v0", api.trim_end_matches('/'));
+        }
+        Self { api }
+    }
+
+    /// Adds raw bytes to IPFS and returns the resulting CID (e.g. `Qm...`).
+    /// Content added this way is pinned by the node (the publisher seeds it).
+    pub fn add_bytes(&self, bytes: &[u8]) -> Result<String> {
+        let boundary = "----rustp2p-bundle-boundary";
+        let mut body = Vec::with_capacity(bytes.len() + 256);
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"bundle.tar\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend_from_slice(bytes);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+        let response = ureq::post(&format!("{}/add", self.api))
+            .set("Content-Type", &format!("multipart/form-data; boundary={boundary}"))
+            .send_bytes(&body)
+            .context("IPFS add failed (is a Kubo node running?)")?;
+        let json: Value = serde_json::from_str(&response.into_string()?)
+            .context("unexpected IPFS add response")?;
+        let cid = json["Hash"]
+            .as_str()
+            .context("IPFS add response missing Hash")?
+            .to_string();
+        if cid.is_empty() {
+            bail!("IPFS add returned an empty CID");
+        }
+        Ok(cid)
+    }
+
+    /// Fetches the raw bytes stored under `cid` from IPFS.
+    pub fn cat(&self, cid: &str) -> Result<Vec<u8>> {
+        let response = ureq::post(&format!("{}/cat?arg={cid}", self.api))
+            .send_bytes(&[])
+            .with_context(|| format!("IPFS cat '{cid}' failed"))?;
+        let mut bytes = Vec::new();
+        response
+            .into_reader()
+            .take(256 * 1024 * 1024)
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("failed reading IPFS object '{cid}'"))?;
+        Ok(bytes)
+    }
+
+    /// Pins `cid` locally so it survives GC and this node reliably seeds it.
+    pub fn pin(&self, cid: &str) -> Result<()> {
+        ureq::post(&format!("{}/pin/add?arg={cid}", self.api))
+            .send_bytes(&[])
+            .with_context(|| format!("IPFS pin '{cid}' failed"))?;
+        Ok(())
+    }
+}
+
+impl Default for IpfsClient {
+    fn default() -> Self {
+        Self::new(IPFS_API)
+    }
+}
+
+/// Adds raw bytes to IPFS on the default node and returns the CID.
+pub fn add_bytes(bytes: &[u8]) -> Result<String> {
+    IpfsClient::default().add_bytes(bytes)
+}
+
+/// Fetches the raw bytes under `cid` from the default node.
 pub fn cat(cid: &str) -> Result<Vec<u8>> {
-    let response = ureq::post(&format!("{IPFS_API}/cat?arg={cid}"))
-        .send_bytes(&[])
-        .with_context(|| format!("IPFS cat '{cid}' failed (is a Kubo node running?)"))?;
-    let mut bytes = Vec::new();
-    response
-        .into_reader()
-        .take(256 * 1024 * 1024)
-        .read_to_end(&mut bytes)
-        .with_context(|| format!("failed reading IPFS object '{cid}'"))?;
-    Ok(bytes)
+    IpfsClient::default().cat(cid)
 }
 
 /// Builds a `.tar` bundle of a game package + its assets in memory.

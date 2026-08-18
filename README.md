@@ -182,9 +182,32 @@ cargo run -p host --bin play_game -- --role A --cid <CID>
 cargo run -p host --bin play_game -- --role B --cid <CID>
 ```
 
-Downloaded bundles are cached under `platform/host/games/<CID>/`. The
-`distribution_test` verifies the full round-trip (publish → fetch → extract →
-hash-verify → byte-identical).
+Downloaded bundles are cached under `platform/host/games/<CID>/` and **pinned**
+on the local node, so a player who downloads a game automatically becomes a
+**seeder** for the swarm. The `distribution_test` verifies the full round-trip
+(publish → fetch → extract → hash-verify → byte-identical).
+
+### P2P game caching
+
+Once any player downloads a game, the game is served by the swarm — the
+original publisher can even go offline. `play_game`/`list_games` accept
+`--ipfs <api>` to point at a specific node (one node per simulated machine).
+
+```sh
+# Machine A publishes (its node seeds the game):
+cargo run -p host --bin publish_game
+CID=$(ls platform/host/games/*.tar | sed 's/.*games\///;s/\.tar//')
+
+# Machine B downloads the game from A and becomes a seeder:
+cargo run -p host --bin cache_test -- $CID http://127.0.0.1:5002/api/v0
+
+# (Machine A goes offline)
+
+# Machine C downloads the same game from the swarm (served by B):
+cargo run -p host --bin cache_test -- $CID http://127.0.0.1:5003/api/v0
+```
+
+Or just play through a seeder node: `play_game --cid $CID --ipfs <api>`.
 
 ## Game discovery (registry)
 
@@ -283,6 +306,7 @@ cargo run -p host --bin avatar_standard_test        # avatar-standard validation
 cargo run -p host --bin avatar_customization_test    # load_avatar + avatar selection
 cargo run -p host --bin cosmetic_signature_test      # signed cosmetic verification
 cargo run -p host --bin distribution_test            # IPFS publish/fetch round-trip*
+cargo run -p host --bin cache_test <CID> <api>       # fetch + pin from the swarm*
 cargo run -p host --bin discovery_test               # registry list->download->verify†
 cargo run -p host --bin trap_test                   # graceful handling of wasm traps
 cargo run -p host --bin render_test                 # 3D scene + wasm-driven pose

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use host::ipfs;
+
 use registry_server::{fetch_games, GameListing};
 use std::path::PathBuf;
 
@@ -18,6 +18,13 @@ fn main() -> Result<()> {
         .position(|a| a == "--download")
         .and_then(|i| args.get(i + 1))
         .cloned();
+    let ipfs_api = args
+        .iter()
+        .position(|a| a == "--ipfs")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .unwrap_or_else(|| host::ipfs::IPFS_API.to_string());
+    let ipfs = host::ipfs::IpfsClient::new(&ipfs_api);
 
     println!("fetching game list from {REGISTRY_URL}/games.json...");
     let games = fetch_games(REGISTRY_URL)?;
@@ -33,7 +40,7 @@ fn main() -> Result<()> {
             .iter()
             .find(|g| g.name == needle || g.cid == needle)
             .with_context(|| format!("no registered game matching '{needle}'"))?;
-        let dir = download_game(listing)?;
+        let dir = download_game(&ipfs, listing)?;
         println!(
             "downloaded '{}' to {}\nlaunch it with: cargo run -p host --bin play_game -- --role A --cid {}",
             listing.name,
@@ -55,9 +62,10 @@ fn display(games: &[GameListing]) {
     println!();
 }
 
-/// Downloads a game's bundle from IPFS by its registry CID and extracts it,
-/// returning the extracted package directory.
-fn download_game(listing: &GameListing) -> Result<PathBuf> {
+/// Downloads a game's bundle from IPFS by its registry CID, extracts it, and
+/// pins it (becoming a seeder for the swarm). Returns the extracted package
+/// directory.
+fn download_game(ipfs: &host::ipfs::IpfsClient, listing: &GameListing) -> Result<PathBuf> {
     let games_dir = PathBuf::from(GAMES_DIR);
     let game_dir = games_dir.join(&listing.cid);
     if game_dir.join("game_manifest.json").exists() {
@@ -65,8 +73,12 @@ fn download_game(listing: &GameListing) -> Result<PathBuf> {
         return Ok(game_dir);
     }
     println!("downloading '{}' from IPFS ({})...", listing.name, listing.cid);
-    let tar_bytes = ipfs::cat(&listing.cid)?;
+    let tar_bytes = ipfs.cat(&listing.cid)?;
     let _ = std::fs::remove_dir_all(&game_dir);
-    ipfs::extract(&tar_bytes, &game_dir)?;
+    host::ipfs::extract(&tar_bytes, &game_dir)?;
+    match ipfs.pin(&listing.cid) {
+        Ok(()) => println!("pinned '{}' — this node is now a seeder", listing.cid),
+        Err(e) => println!("warning: could not pin '{}': {e}", listing.cid),
+    }
     Ok(game_dir)
 }
