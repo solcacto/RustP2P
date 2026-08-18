@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "platform/platform-cli",
     "platform/host",
     "platform/guest",
     "platform/guest-sdk",

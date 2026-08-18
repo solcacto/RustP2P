@@ -22,6 +22,20 @@ fn main() -> Result<()> {
     m.verify_wasm(&m.wasm_entry, &wasm)?;
     println!("✓ shipped game_manifest.json parses, validates, and matches the packaged wasm");
 
+    // 1b. The shipped package is publisher-signed and the signature verifies.
+    if m.signature.is_some() {
+        m.verify_publisher(&wasm)?;
+        println!("✓ shipped publisher signature verifies");
+        // Tampering with the signature must be rejected.
+        let mut forged = m.clone();
+        forged.signature = Some("ed25519_sig:deadbeef".to_string());
+        assert_rejected(forged.verify_publisher(&wasm), "forged publisher signature");
+    } else {
+        // Legacy unsigned manifests must still load.
+        m.verify_publisher(&wasm)?;
+        println!("✓ unsigned (legacy) manifest loads without a signature");
+    }
+
     // 2. A tampered wasm byte must be refused.
     let mut tampered = wasm.clone();
     let last = tampered.len() - 1;

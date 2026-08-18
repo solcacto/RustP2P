@@ -129,6 +129,7 @@ fn main() -> Result<()> {
         )
     })?;
     manifest.verify_wasm(&manifest.wasm_entry, &wasm_bytes)?;
+    manifest.verify_publisher(&wasm_bytes)?;
     let wasm_size = wasm_bytes.len();
 
     // The avatar is loaded from a configurable path before the game starts and

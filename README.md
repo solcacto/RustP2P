@@ -89,6 +89,7 @@ Key properties:
 │   │       └── src/test_modules/   # WAT test guests (security/network/render)
 │   └── signaling_server/      # WebSocket discovery server
 │   └── registry_server/       # Lightweight game registry (only central component)
+│   └── platform-cli/          # platform build/test/publish/run pipeline
 ├── docs/
 │   ├── AVATAR_STANDARD.md     # The Universal Avatar standard
 │   ├── GAME_MANIFEST.md       # game_manifest.json format + validation
@@ -138,6 +139,33 @@ cargo run -p host --bin hash_wasm -- platform/guest/guest.wasm
 ```
 
 If the hash ever mismatches, the host refuses to load the tampered artifact.
+
+## Platform CLI
+
+`platform` is the developer's build pipeline — one tool for the whole
+build → test → publish → run loop:
+
+```sh
+# Build: compile the guest to wasm, generate the manifest, validate avatar
+# conformance, and sign the bundle (ed25519) as the publisher.
+cargo run -p platform-cli -- build
+
+# Test: run the wasm in a headless host with mock peers; verify it doesn't
+# crash (and that the avatar moves under scripted input).
+cargo run -p platform-cli -- test --frames 120
+
+# Publish: upload the bundle to IPFS and register the CID in the registry.
+cargo run -p platform-cli -- publish --description "My game"
+
+# Run: launch the host with the local guest for quick iteration.
+cargo run -p platform-cli -- run --role A
+```
+
+Options: `--package <dir>` points at any game package (default `platform/guest`;
+SDK games scaffolded into `platform/games/` work too), `--signer <hex>` picks the
+publisher signing key (default: the platform dev key), and `platform run`
+forwards its arguments to `play_game`. Built manifests carry the publisher's
+ed25519 signature, which the host verifies on load.
 
 ## Run the game
 

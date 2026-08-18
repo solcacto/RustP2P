@@ -5,5 +5,12 @@
     "description": "A simple tag game",
     "author": "solcacto",
     "mode": "session"
+  },
+  {
+    "name": "Chase Tag",
+    "cid": "QmY3v4u5Sbmxkq4tiuab1v4HGm9k2QAF8MDpkxxtQLvzPV",
+    "description": "Chase Tag via platform CLI",
+    "author": "solcacto",
+    "mode": "session"
   }
 ]

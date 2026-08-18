@@ -7,5 +7,11 @@
   "mode": "session",
   "max_players": 8,
   "avatar_skeleton": "standard_v1",
-  "host_functions_required": ["input", "network", "render"]
+  "host_functions_required": [
+    "input",
+    "network",
+    "render"
+  ],
+  "signer_pubkey": "ed25519:d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+  "signature": "ed25519_sig:2b4b33a882da2c690573aebafd1d2181dd8c1f28de00fac8612c7117a2ba9c408a39703d3c8c1a82a511f433092e42783980c3356f4e51496518aebce18de40c"
 }
