@@ -84,6 +84,7 @@ Key properties:
 │   │       ├── src/bin/            # play_game + framework tests/tools
 │   │       └── src/test_modules/   # WAT test guests (security/network/render)
 │   └── signaling_server/      # WebSocket discovery server
+│   └── registry_server/       # Lightweight game registry (only central component)
 ├── docs/
 │   ├── AVATAR_STANDARD.md     # The Universal Avatar standard
 │   ├── GAME_MANIFEST.md       # game_manifest.json format + validation
@@ -185,6 +186,33 @@ Downloaded bundles are cached under `platform/host/games/<CID>/`. The
 `distribution_test` verifies the full round-trip (publish → fetch → extract →
 hash-verify → byte-identical).
 
+## Game discovery (registry)
+
+The **only centralized component** is a lightweight game registry: a
+`games.json` list of available games (name, CID, description, author, mode). It
+is trivially replaceable — anyone can host a mirror, serve a static
+`games.json`, or pin the file on IPFS.
+
+```sh
+# 1. Start the registry (the default games.json lives in the crate):
+cargo run -p registry_server
+
+# 2. Publish and register a game:
+cargo run -p host --bin publish_game -- --register --description "A simple tag game"
+
+# 3. Browse available games:
+cargo run -p host --bin list_games
+
+# 4. Download a game by its registry entry (fetches from IPFS by CID):
+cargo run -p host --bin list_games -- --download "Chase Tag"
+
+# 5. Launch it:
+cargo run -p host --bin play_game -- --role A --cid <CID>
+```
+
+The `discovery_test` verifies list → download → verify against a running
+registry + IPFS node.
+
 ### Controls
 
 | Key                 | Action                        |
@@ -255,6 +283,7 @@ cargo run -p host --bin avatar_standard_test        # avatar-standard validation
 cargo run -p host --bin avatar_customization_test    # load_avatar + avatar selection
 cargo run -p host --bin cosmetic_signature_test      # signed cosmetic verification
 cargo run -p host --bin distribution_test            # IPFS publish/fetch round-trip*
+cargo run -p host --bin discovery_test               # registry list->download->verify†
 cargo run -p host --bin trap_test                   # graceful handling of wasm traps
 cargo run -p host --bin render_test                 # 3D scene + wasm-driven pose
 cargo run -p host --bin multiplayer_test -- --role A   # needs 2 terminals
@@ -266,6 +295,7 @@ cargo run -p host --bin network_test
 ```
 
 `*distribution_test` requires a Kubo/IPFS node running on `127.0.0.1:5001`.
+`†discovery_test` additionally requires the registry server on `127.0.0.1:9002`.
 
 ## Lifecycle & error handling
 
