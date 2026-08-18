@@ -1,3 +1,14 @@
+//! Bevy-based 3D renderer and per-frame game loop for the host.
+//!
+//! [`build_app`] constructs a minimal Bevy app (no `DefaultPlugins`): one
+//! camera, one directional light, a ground plane, the local avatar, and remote
+//! avatar entities synced over the P2P link. Bevy's winit runner owns the main
+//! loop, so the guest tick is registered as the `wasm_render_tick` Update
+//! system — each rendered frame runs one guest tick, applies its pose to the
+//! local avatar, syncs remote avatars, and refreshes the score HUD. Real
+//! keyboard input is read by `read_keyboard` and written into the host's input
+//! buffer before the guest tick runs.
+
 use crate::avatar_state::{AvatarPose, AvatarState};
 use crate::host_state::HostState;
 use crate::input_state::InputState;
@@ -33,15 +44,24 @@ pub const TEST_FRAMES: u32 = 240;
 
 /// Configurable exit-after-N-frames limit for the game binary.
 #[derive(Resource)]
-pub struct TestFrameLimit(pub u32);
+pub struct TestFrameLimit(
+    /// Number of rendered frames after which the app exits.
+    pub u32,
+);
 
 /// Shared pose target bridging the Wasm guest and the Bevy scene graph.
 #[derive(Resource, Clone)]
-pub struct AvatarStateHandle(pub Arc<Mutex<AvatarState>>);
+pub struct AvatarStateHandle(
+    /// The shared local avatar pose written by the guest each frame.
+    pub Arc<Mutex<AvatarState>>,
+);
 
 /// Latest pose of every remote peer's avatar, shared with the network poll.
 #[derive(Resource, Clone)]
-pub struct RemoteAvatarsHandle(pub Arc<Mutex<HashMap<String, AvatarPose>>>);
+pub struct RemoteAvatarsHandle(
+    /// Map of peer id to the peer's latest received pose.
+    pub Arc<Mutex<HashMap<String, AvatarPose>>>,
+);
 
 /// Marker identifying the loaded Universal Avatar scene root.
 #[derive(Component)]
@@ -53,13 +73,19 @@ pub struct RemoteAvatar;
 
 /// Peer id a remote avatar entity mirrors.
 #[derive(Component)]
-pub struct RemotePeerId(pub String);
+pub struct RemotePeerId(
+    /// The remote peer's id this entity mirrors.
+    pub String,
+);
 
 /// When true, `read_keyboard` ignores real keys and feeds scripted input so the
 /// whole stack (input -> guest -> pose -> network -> score) can be exercised
 /// headlessly (role A drives toward role B).
 #[derive(Resource)]
-pub struct AutoInput(pub bool);
+pub struct AutoInput(
+    /// Whether scripted (headless) input is active.
+    pub bool,
+);
 
 /// Marks the on-screen score text entity.
 #[derive(Component)]
@@ -69,7 +95,9 @@ pub struct ScoreText;
 /// drive exactly one guest tick per rendered frame.
 #[derive(Resource)]
 pub struct WasmRuntime {
+    /// Shared handle to the wasmtime store hosting the guest's host state.
     pub store: Arc<Mutex<wasmtime::Store<HostState>>>,
+    /// The guest's `game_tick` (or equivalent) export, called once per frame.
     pub render_tick: TypedFunc<(), ()>,
 }
 

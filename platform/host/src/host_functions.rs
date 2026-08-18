@@ -1,7 +1,22 @@
+//! The Wasm guest's entire view of the outside world.
+//!
+//! Every host function a guest can call is registered here on the `env`
+//! import module of a wasmtime [`Linker`]. Nothing else is reachable from
+//! inside the sandbox. All functions are type-safe (wasmtime checks signatures
+//! at instantiation) and every pointer argument is bounds-checked against the
+//! guest's linear memory before being read or written.
+//!
+//! See `docs/HOST_FUNCTIONS.md` in the repository root for the full reference.
+
 use crate::host_state::HostState;
 use anyhow::anyhow;
 use wasmtime::{Caller, Linker, Result};
 
+/// Registers every host function on `linker` under the `env` import module.
+///
+/// Call this once per [`wasmtime::Engine`], then instantiate guest modules
+/// against the linker. Unknown imports that a guest tries to resolve will be
+/// rejected at instantiation time.
 pub fn register(linker: &mut Linker<HostState>) -> Result<()> {
     linker.func_wrap(
         "env",

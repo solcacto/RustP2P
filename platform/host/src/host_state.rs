@@ -1,3 +1,9 @@
+//! Per-instance host state shared with a running Wasm guest.
+//!
+//! Each `Store<HostState>` owns exactly one [`HostState`], so no state can
+//! leak between guest modules or instances. Host functions read and mutate it
+//! through `Caller::data()` / `Caller::data_mut()`.
+
 use crate::avatar_state::{AvatarPose, AvatarState};
 use crate::input_state::InputState;
 use crate::peer_connection::PeerConnection;
@@ -5,6 +11,12 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+/// All state the host keeps for a single Wasm instance.
+///
+/// This is the only handle a guest has to the host's world: host functions
+/// read the fields below (input, peer connection, avatar state) and mutate the
+/// ones the guest is allowed to write (score, poses). Everything is owned here
+/// rather than in globals, keeping instances isolated from one another.
 pub struct HostState {
     counter: u32,
     name: String,
@@ -29,6 +41,10 @@ pub struct HostState {
 }
 
 impl HostState {
+    /// Creates a fresh instance whose peer identity is `name`.
+    ///
+    /// The same name is reported by [`HostState::peer_id`] and used as the
+    /// identity this node registers with the signaling server.
     pub fn new(name: impl Into<String>) -> Self {
         let name = name.into();
         Self {
@@ -51,18 +67,26 @@ impl HostState {
         }
     }
 
+    /// Increments the demo counter exposed through the `increment_counter`
+    /// host function.
     pub fn increment_counter(&mut self) {
         self.counter += 1;
     }
 
+    /// Returns the current value of the demo counter.
     pub fn counter(&self) -> u32 {
         self.counter
     }
 
+    /// Returns the instance name (identical to the peer id).
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// Advances the frame clock and returns the delta time since the previous
+    /// call, in seconds.
+    ///
+    /// Called once per rendered frame by the renderer before the guest tick.
     pub fn update_frame(&mut self) -> f64 {
         let now = Instant::now();
         let delta = now.duration_since(self.last_frame_time).as_secs_f64();
@@ -72,10 +96,12 @@ impl HostState {
         delta
     }
 
+    /// Returns the number of frames rendered so far.
     pub fn frame_count(&self) -> u64 {
         self.frame_count
     }
 
+    /// Returns the delta time of the most recent frame, in seconds.
     pub fn delta_time(&self) -> f64 {
         self.delta_time
     }
@@ -86,82 +112,104 @@ impl HostState {
         self.input_state = input;
     }
 
+    /// Returns the current frame's input state.
     pub fn input(&self) -> &InputState {
         &self.input_state
     }
 
+    /// Returns the previous frame's input state.
     pub fn previous_input(&self) -> &InputState {
         &self.previous_input_state
     }
 
+    /// Returns this node's peer id, as registered with the signaling server.
     pub fn peer_id(&self) -> &str {
         &self.peer_id
     }
 
+    /// Replaces the peer connection, or removes it when passed `None`.
     pub fn set_peer_connection(&mut self, pc: Option<PeerConnection>) {
         self.peer_connection = pc;
     }
 
+    /// Returns the live peer connection, if one has been established.
     pub fn peer_connection(&self) -> Option<&PeerConnection> {
         self.peer_connection.as_ref()
     }
 
+    /// Returns the live peer connection mutably, if one has been established.
     pub fn peer_connection_mut(&mut self) -> Option<&mut PeerConnection> {
         self.peer_connection.as_mut()
     }
 
+    /// Returns the ids of peers this node has established links with.
     pub fn connected_peers(&self) -> &[String] {
         &self.connected_peers
     }
 
+    /// Returns the mutable list of connected peer ids.
     pub fn connected_peers_mut(&mut self) -> &mut Vec<String> {
         &mut self.connected_peers
     }
 
+    /// Returns the queue of inbound network messages for the guest.
     pub fn incoming_messages(&self) -> &VecDeque<Vec<u8>> {
         &self.incoming_messages
     }
 
+    /// Returns the mutable queue of inbound network messages for the guest.
     pub fn incoming_messages_mut(&mut self) -> &mut VecDeque<Vec<u8>> {
         &mut self.incoming_messages
     }
 
+    /// Attaches the shared local avatar pose written by the guest, or detaches
+    /// it when passed `None`.
     pub fn set_avatar_state(&mut self, state: Option<Arc<Mutex<AvatarState>>>) {
         self.avatar_state = state;
     }
 
+    /// Returns the shared local avatar pose handle, if attached.
     pub fn avatar_state(&self) -> Option<&Arc<Mutex<AvatarState>>> {
         self.avatar_state.as_ref()
     }
 
+    /// Replaces the shared map of remote avatar poses (also handed to the
+    /// renderer so both sides observe the same data).
     pub fn set_remote_avatars(&mut self, map: Arc<Mutex<HashMap<String, AvatarPose>>>) {
         self.remote_avatars = map;
     }
 
+    /// Returns the shared map of the latest pose of every remote peer.
     pub fn remote_avatars(&self) -> &Arc<Mutex<HashMap<String, AvatarPose>>> {
         &self.remote_avatars
     }
 
+    /// Sets which movement axis this role uses (0 = X, 1 = Z).
     pub fn set_movement_axis(&mut self, axis: u8) {
         self.movement_axis = axis;
     }
 
+    /// Returns the movement axis for this role.
     pub fn movement_axis(&self) -> u8 {
         self.movement_axis
     }
 
+    /// Records the local tag score reported by the guest.
     pub fn set_tag_score(&mut self, score: u32) {
         self.tag_score = score;
     }
 
+    /// Returns the latest local tag score reported by the guest.
     pub fn tag_score(&self) -> u32 {
         self.tag_score
     }
 
+    /// Replaces the shared map of remote peers' tag scores.
     pub fn set_remote_scores(&mut self, map: Arc<Mutex<HashMap<String, u32>>>) {
         self.remote_scores = map;
     }
 
+    /// Returns the shared map of the latest tag score of every remote peer.
     pub fn remote_scores(&self) -> &Arc<Mutex<HashMap<String, u32>>> {
         &self.remote_scores
     }

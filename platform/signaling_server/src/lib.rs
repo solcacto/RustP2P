@@ -1,3 +1,11 @@
+//! Minimal WebSocket signaling server for P2P peer discovery.
+//!
+//! Peers connect over WebSocket, register a peer id plus their UDP address,
+//! and request connections to each other. The server never relays game
+//! traffic — it only exchanges `connection_info` messages so peers can talk
+//! directly over UDP. Disconnected peers are removed from the registry so
+//! stale registrations never linger.
+
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;

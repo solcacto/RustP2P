@@ -1,3 +1,10 @@
+//! Direct peer-to-peer connectivity over UDP with WebSocket signaling.
+//!
+//! A [`PeerConnection`] registers with a signaling server, learns other peers'
+//! UDP addresses through it, and then exchanges game datagrams directly over
+//! UDP — the signaling server is only used for discovery, not for relaying
+//! game traffic.
+
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -6,6 +13,8 @@ use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::time::{Duration, Instant};
 use tungstenite::{client as ws_client, Message, WebSocket};
 
+/// A P2P link to other game peers: one non-blocking UDP socket for game
+/// traffic plus a WebSocket to the signaling server for address discovery.
 pub struct PeerConnection {
     peer_id: String,
     udp: UdpSocket,
@@ -14,6 +23,11 @@ pub struct PeerConnection {
 }
 
 impl PeerConnection {
+    /// Opens the UDP socket, connects to the signaling server at `signal_addr`
+    /// (for example `"127.0.0.1:9001"`), and registers `peer_id` with it.
+    ///
+    /// `udp_bind` is the local bind address for the game socket, e.g.
+    /// `"127.0.0.1:0"` to let the OS pick a free port.
     pub fn new(peer_id: impl Into<String>, signal_addr: &str, udp_bind: &str) -> Result<Self> {
         let peer_id = peer_id.into();
 
@@ -42,14 +56,17 @@ impl PeerConnection {
         Ok(pc)
     }
 
+    /// Returns this node's registered peer id.
     pub fn peer_id(&self) -> &str {
         &self.peer_id
     }
 
+    /// Returns the local UDP socket address game traffic is sent from.
     pub fn local_addr(&self) -> Result<SocketAddr> {
         Ok(self.udp.local_addr()?)
     }
 
+    /// Returns the known UDP address of `peer_id`, if a link was established.
     pub fn peer_addr(&self, peer_id: &str) -> Option<&SocketAddr> {
         self.peers.get(peer_id)
     }
@@ -89,10 +106,14 @@ impl PeerConnection {
         }
     }
 
+    /// Sends `data` as a single UDP datagram to `addr`, returning the number of
+    /// bytes sent.
     pub fn send_udp(&self, addr: SocketAddr, data: &[u8]) -> Result<usize> {
         Ok(self.udp.send_to(data, addr)?)
     }
 
+    /// Blocks (up to five seconds) until a UDP datagram arrives, returning its
+    /// payload and sender address.
     pub fn recv_udp(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr)> {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {

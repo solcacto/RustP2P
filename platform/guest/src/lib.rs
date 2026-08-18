@@ -14,9 +14,13 @@
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct AvatarPose {
+    /// World-space X translation in units.
     pub x: f32,
+    /// World-space Y translation in units.
     pub y: f32,
+    /// World-space Z translation in units.
     pub z: f32,
+    /// Yaw rotation in radians.
     pub rot_y: f32,
 }
 
