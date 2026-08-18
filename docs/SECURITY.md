@@ -81,6 +81,10 @@ it.
 
 - Game packages are pinned by SHA-256 (`wasm_hash` in the manifest); a tampered
   wasm is refused before it runs.
+- IPFS CIDs are content-addressed, so a fetched bundle is guaranteed to be
+  byte-for-byte what was published at that CID; the wasm hash is still verified
+  after download to guard against a malicious publisher shipping an inconsistent
+  manifest+wasm pair.
 - Cosmetic packages carry an ed25519 signature over
   `item_id | attachment_point | sha256(mesh)`; tampered cosmetics (manifest or
   mesh) fail verification and are **silently not rendered**.

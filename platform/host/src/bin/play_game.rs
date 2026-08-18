@@ -10,7 +10,6 @@ use host::{
     renderer,
 };
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use wasmtime::{Engine, Linker, Module, Store};
@@ -21,9 +20,11 @@ const GAME_PACKAGE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../guest");
 const MANIFEST_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../guest/game_manifest.json");
 const AVATAR_ASSET_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets");
 
-/// Commit 12: loads a game *package* — a `game_manifest.json` plus its Wasm —
+/// Commit 17: loads a game *package* — a `game_manifest.json` plus its Wasm —
 /// validates the manifest, refuses to load if the pinned SHA-256 doesn't match,
 /// then runs the Chase/Tag session with real keyboard input and a score HUD.
+/// With `--cid <CID>` the package is fetched from IPFS instead of the local
+/// guest directory.
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let role = args
@@ -32,7 +33,7 @@ fn main() -> Result<()> {
         .map(|i| args[i + 1].clone())
         .unwrap_or_else(|| "A".to_string());
     if role != "A" && role != "B" {
-        bail!("usage: play_game --role A|B [--avatar <path>] [--cosmetic <manifest>] [--auto] [--frames N] [--no-exit]");
+        bail!("usage: play_game --role A|B [--cid <CID>] [--avatar <path>] [--cosmetic <manifest>] [--auto] [--frames N] [--no-exit]");
     }
     let local_id = format!("Peer{role}");
     let remote_id = if role == "A" { "PeerB" } else { "PeerA" };
@@ -45,6 +46,11 @@ fn main() -> Result<()> {
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
         .unwrap_or(900);
+    let cid = args
+        .iter()
+        .position(|a| a == "--cid")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
     // Avatar asset path, relative to the host asset folder.
     let avatar_path = args
         .iter()
@@ -69,21 +75,34 @@ fn main() -> Result<()> {
     let remote_avatars: Arc<Mutex<HashMap<String, AvatarPose>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
+    // Determine the game package location: from IPFS by CID, or the local
+    // guest directory.
+    let (package_dir, manifest_path): (std::path::PathBuf, std::path::PathBuf) = match &cid {
+        Some(cid) => {
+            let game_dir = fetch_game_from_ipfs(cid)?;
+            (game_dir.clone(), game_dir.join("game_manifest.json"))
+        }
+        None => (
+            std::path::PathBuf::from(GAME_PACKAGE_DIR),
+            std::path::PathBuf::from(MANIFEST_PATH),
+        ),
+    };
+
     // Load and validate the game package manifest, then load the Wasm it pins
     // and verify the artifact's hash before trusting a single byte.
-    let manifest = GameManifest::from_path(MANIFEST_PATH)?;
+    let manifest = GameManifest::from_path(&manifest_path)?;
     println!(
         "[{role}] game: {} v{} by {} (mode={:?}, max_players={})",
         manifest.name, manifest.version, manifest.author, manifest.mode, manifest.max_players
     );
-    let wasm_path = Path::new(GAME_PACKAGE_DIR).join(&manifest.wasm_entry);
+    let wasm_path = package_dir.join(&manifest.wasm_entry);
     let wasm_bytes = std::fs::read(&wasm_path).with_context(|| {
         format!(
             "{} not found in game package {} — build the guest first:\n  \
              cargo build -p guest --target wasm32-unknown-unknown --release && \
              cp target/wasm32-unknown-unknown/release/guest.wasm platform/guest/guest.wasm",
             manifest.wasm_entry,
-            GAME_PACKAGE_DIR
+            package_dir.display()
         )
     })?;
     manifest.verify_wasm(&manifest.wasm_entry, &wasm_bytes)?;
@@ -226,6 +245,27 @@ fn main() -> Result<()> {
 
     println!("[{role}] ✓ game session complete");
     Ok(())
+}
+
+/// Fetches a game bundle from IPFS by CID, extracts it into `games/<cid>/`,
+/// and returns the extracted package directory.
+fn fetch_game_from_ipfs(cid: &str) -> Result<std::path::PathBuf> {
+    let games_dir = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/games"));
+    let game_dir = games_dir.join(cid);
+    if game_dir.join("game_manifest.json").exists() {
+        println!("[{cid}] already downloaded; using local copy at {}", game_dir.display());
+        return Ok(game_dir);
+    }
+
+    println!("[{cid}] fetching bundle from IPFS...");
+    let tar_bytes = host::ipfs::cat(cid)?;
+    println!("[{cid}] fetched {} bytes", tar_bytes.len());
+
+    // Remove any stale extraction and unpack fresh.
+    let _ = std::fs::remove_dir_all(&game_dir);
+    host::ipfs::extract(&tar_bytes, &game_dir)?;
+    println!("[{cid}] extracted game package to {}", game_dir.display());
+    Ok(game_dir)
 }
 
 /// Creates a peer connection, retrying until the signaling server is reachable.

@@ -72,6 +72,8 @@ Key properties:
 │   │       ├── host_functions.rs   # All sandbox escape hatches (env module)
 │   │       ├── host_state.rs       # Per-instance host state
 │   │       ├── avatar_standard.rs  # Avatar-standard validator
+│   │       ├── cosmetic.rs         # Signed cosmetic verification
+│   │       ├── ipfs.rs             # IPFS publish/fetch (Kubo HTTP API)
 │   │       ├── manifest.rs         # Game manifest validation + hash verify
 │   │       ├── peer_connection.rs  # UDP + WebSocket signaling
 │   │       ├── renderer.rs         # Bevy scene, game loop, keyboard, HUD
@@ -154,6 +156,35 @@ cargo run -p host --bin play_game -- --role A
 cargo run -p host --bin play_game -- --role B
 ```
 
+## Decentralized distribution (IPFS)
+
+Games are distributed peer-to-peer, not from a server. A game is bundled into
+a `.tar` (`guest.wasm` + `game_manifest.json` + assets) and pinned on a local
+**Kubo/IPFS node**; its **CID is the game's permanent address**. Players fetch
+the exact same bytes from the swarm by that CID.
+
+Prerequisites: a running Kubo daemon on `127.0.0.1:5001`
+(`brew install ipfs && ipfs init && ipfs daemon`).
+
+**Publish the game:**
+
+```sh
+cargo run -p host --bin publish_game
+# -> CID = QmZMLbVr5jVnUEMKviW1qnQNGXH93HsqAejBULUGGMtTpB
+```
+
+**Play a game by CID** (fetches the bundle from IPFS, extracts it, validates
+the manifest + wasm hash, then runs):
+
+```sh
+cargo run -p host --bin play_game -- --role A --cid <CID>
+cargo run -p host --bin play_game -- --role B --cid <CID>
+```
+
+Downloaded bundles are cached under `platform/host/games/<CID>/`. The
+`distribution_test` verifies the full round-trip (publish → fetch → extract →
+hash-verify → byte-identical).
+
 ### Controls
 
 | Key                 | Action                        |
@@ -223,6 +254,7 @@ cargo run -p host --bin manifest_test               # manifest validation + hash
 cargo run -p host --bin avatar_standard_test        # avatar-standard validation
 cargo run -p host --bin avatar_customization_test    # load_avatar + avatar selection
 cargo run -p host --bin cosmetic_signature_test      # signed cosmetic verification
+cargo run -p host --bin distribution_test            # IPFS publish/fetch round-trip*
 cargo run -p host --bin trap_test                   # graceful handling of wasm traps
 cargo run -p host --bin render_test                 # 3D scene + wasm-driven pose
 cargo run -p host --bin multiplayer_test -- --role A   # needs 2 terminals
@@ -232,6 +264,8 @@ cargo run -p host --bin multiplayer_test -- --role B
 cargo run -p signaling_server &   # in another terminal
 cargo run -p host --bin network_test
 ```
+
+`*distribution_test` requires a Kubo/IPFS node running on `127.0.0.1:5001`.
 
 ## Lifecycle & error handling
 
