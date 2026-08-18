@@ -225,6 +225,7 @@ pub fn build_app(
             wasm_render_tick,
             sync_avatar_scene,
             apply_avatar_pose,
+            update_chunk_claims,
             sync_remote_avatars,
             tint_remote_avatars,
             attach_cosmetics,
@@ -481,18 +482,13 @@ fn poll_network(store: &mut wasmtime::Store<HostState>) {
     let mut map = remote.lock().unwrap();
     let remote_scores = store.data().remote_scores().clone();
     let mut scores = remote_scores.lock().unwrap();
+    let chunk_registry = store.data().chunk_registry().clone();
+    let mut chunks = chunk_registry.lock().unwrap();
     let now = Instant::now();
     for (addr, payload) in incoming {
-        let peer_id = match store
-            .data()
-            .peer_connection()
-            .and_then(|pc| pc.peer_id_for_addr(&addr).cloned())
-        {
-            Some(id) => id,
-            None => continue,
-        };
         match payload.len() {
             16 => {
+                let Some(peer_id) = peer_id_for(store, addr) else { continue };
                 let x = f32::from_le_bytes(payload[0..4].try_into().unwrap());
                 let y = f32::from_le_bytes(payload[4..8].try_into().unwrap());
                 let z = f32::from_le_bytes(payload[8..12].try_into().unwrap());
@@ -503,12 +499,28 @@ fn poll_network(store: &mut wasmtime::Store<HostState>) {
                 map.insert(peer_id, AvatarPose { x, y, z, rot_y, last_seen: now });
             }
             4 => {
+                let Some(peer_id) = peer_id_for(store, addr) else { continue };
                 let score = u32::from_le_bytes(payload[0..4].try_into().unwrap());
                 scores.insert(peer_id, score);
             }
-            _ => {}
+            _ => {
+                // Chunk claim: the claim carries its own peer id and is
+                // self-authenticating (no reverse lookup needed).
+                if let Some(claim) = crate::chunk::ChunkClaim::from_wire(&payload) {
+                    chunks.apply_claim(&claim, addr);
+                    println!("[chunk] {} hosts chunk region ({},{})", claim.peer_id, claim.origin_x, claim.origin_z);
+                }
+            }
         }
     }
+}
+
+/// Resolves the peer id for a sender address, if the link knows it.
+fn peer_id_for(store: &wasmtime::Store<HostState>, addr: std::net::SocketAddr) -> Option<String> {
+    store
+        .data()
+        .peer_connection()
+        .and_then(|pc| pc.peer_id_for_addr(&addr).cloned())
 }
 
 /// Copies the pose written by the Wasm guest onto the avatar's `Transform`.
@@ -520,6 +532,33 @@ fn apply_avatar_pose(
         let pose = *handle.0.lock().unwrap();
         transform.translation = Vec3::new(pose.x, pose.y, pose.z);
         transform.rotation = Quat::from_rotation_y(pose.rot_y);
+    }
+}
+
+/// Claims chunks for the local avatar: whenever the avatar crosses into a new
+/// chunk, this peer broadcasts "I am hosting chunks X,Y and X+1,Y" and records
+/// the ownership in the shared DHT.
+fn update_chunk_claims(
+    avatar: Res<AvatarStateHandle>,
+    runtime: Res<WasmRuntime>,
+    mut last: Local<Option<crate::chunk::ChunkCoord>>,
+) {
+    let pose = *avatar.0.lock().unwrap();
+    let coord = crate::chunk::ChunkCoord::at(pose.x, pose.z);
+    if *last == Some(coord) {
+        return;
+    }
+    *last = Some(coord);
+    let mut store = runtime.store.lock().unwrap();
+    match store.data_mut().claim_around_position(pose.x, pose.z) {
+        Ok(()) => println!(
+            "[chunk] now hosting chunks ({},{}) and ({},{})",
+            coord.x,
+            coord.z,
+            coord.x + 1,
+            coord.z
+        ),
+        Err(e) => println!("[chunk] claim failed: {e}"),
     }
 }
 

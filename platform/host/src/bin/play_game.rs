@@ -203,6 +203,13 @@ fn main() -> Result<()> {
     connect_to_peer(&mut store, remote_id)?;
     println!("[{role}] connected to {remote_id}");
 
+    // Chunk ownership: on joining, claim the spawn chunk plus the one to +X.
+    // ("I am hosting chunks X,Y and X+1,Y.")
+    store
+        .data_mut()
+        .claim_chunk_region(host::chunk::ChunkCoord { x: 0, z: 0 }, (2, 1))?;
+    println!("[{role}] hosting chunks (0,0) and (1,0) (registered in the chunk DHT)");
+
     // Build the Bevy renderer: one guest `game_tick` per rendered frame.
     let mut app = renderer::build_app(avatar_state.clone(), remote_avatars.clone());
     let store_handle = Arc::new(Mutex::new(store));

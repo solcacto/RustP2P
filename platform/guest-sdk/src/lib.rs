@@ -140,6 +140,19 @@ impl Context {
     pub fn load_avatar(&self, path: &str) -> bool {
         bridge::load_avatar(path.as_bytes())
     }
+
+    /// Claims a region of world chunks on behalf of this peer. The claim is
+    /// recorded in the host's chunk DHT and broadcast to every known peer.
+    pub fn claim_chunks(&self, origin_x: i32, origin_z: i32, extent_x: u32, extent_z: u32) {
+        bridge::broadcast_chunk_claim(origin_x, origin_z, extent_x as i32, extent_z as i32);
+    }
+
+    /// Looks up who hosts a world chunk, returning their peer id if known.
+    pub fn chunk_owner(&self, chunk_x: i32, chunk_z: i32) -> Option<String> {
+        let mut buf = [0u8; 64];
+        let n = bridge::get_chunk_owner(chunk_x, chunk_z, &mut buf)?;
+        Some(String::from_utf8_lossy(&buf[..n]).into_owned())
+    }
 }
 
 /// Runs the game: lazily creates one instance per concrete `Game` type and

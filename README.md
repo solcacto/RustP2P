@@ -187,6 +187,28 @@ the discovery registry with one click.
 Server endpoints: `POST /api/compile`, `GET /api/preview-wasm?session=<id>`,
 `POST /api/publish`, `GET /api/games`.
 
+## Open world & spatial chunks
+
+The world is divided into a grid of **100×100-unit chunks**. Each chunk is
+**hosted (owned) by a peer** — the open-world equivalent of the session game
+loop, persisted peer-to-peer instead of on a server.
+
+- **Chunk ownership** — when a peer comes online it claims its spawn chunk plus
+  the one to +X ("I am hosting chunks X,Y and X+1,Y"), records it in the shared
+  chunk DHT, and broadcasts the claim over the P2P mesh. As the avatar crosses
+  into a new chunk, the host re-claims automatically.
+- **Kad-style chunk DHT** — `host::chunk::ChunkDht` maps chunk coordinates to
+  the hosting peer's id and UDP address, with Kademlia's XOR-distance routing
+  for "who is nearest to chunk X?" queries. Claims are self-identifying
+  datagrams, so they propagate peer-to-peer without the signaling server.
+- **Guest access** — `Context::claim_chunks(x, z, w, h)` and
+  `Context::chunk_owner(x, z)` let games claim and resolve chunk ownership
+  (host functions `broadcast_chunk_claim` / `get_chunk_owner`).
+
+```sh
+cargo run -p host --bin chunk_test   # chunk math, claims, DHT, host functions
+```
+
 ## Run the game
 
 Open three terminals.
@@ -404,6 +426,7 @@ cargo run -p host --bin input_test                  # input getters
 cargo run -p host --bin network_wasm_test           # wasm<->wasm messages
 cargo run -p host --bin manifest_test               # manifest validation + hash gate
 cargo run -p host --bin avatar_standard_test        # avatar-standard validation
+cargo run -p host --bin chunk_test                  # spatial chunk math, claims, DHT
 cargo run -p host --bin avatar_customization_test    # load_avatar + avatar selection
 cargo run -p host --bin cosmetic_signature_test      # signed cosmetic verification
 cargo run -p host --bin distribution_test            # IPFS publish/fetch round-trip*

@@ -331,5 +331,62 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<()> {
         },
     )?;
 
+    linker.func_wrap(
+        "env",
+        "broadcast_chunk_claim",
+        |mut caller: Caller<'_, HostState>,
+         origin_x: i32,
+         origin_z: i32,
+         extent_x: i32,
+         extent_z: i32| -> Result<()> {
+            let extent = (
+                extent_x.max(1) as u32,
+                extent_z.max(1) as u32,
+            );
+            caller.data_mut().claim_chunk_region(
+                crate::chunk::ChunkCoord { x: origin_x, z: origin_z },
+                extent,
+            )?;
+            Ok(())
+        },
+    )?;
+
+    linker.func_wrap(
+        "env",
+        "get_chunk_owner",
+        |mut caller: Caller<'_, HostState>,
+         chunk_x: i32,
+         chunk_z: i32,
+         out_peer_ptr: i32,
+         out_peer_len: i32| -> Result<i32> {
+            if out_peer_ptr < 0 || out_peer_len < 0 {
+                return Ok(0);
+            }
+            let mem = caller
+                .get_export("memory")
+                .and_then(|e| e.into_memory())
+                .ok_or_else(|| anyhow!("guest has no memory export"))?;
+            let mem_size = mem.data_size(&caller);
+            let out_end = out_peer_ptr as usize + out_peer_len as usize;
+            if out_end > mem_size {
+                return Ok(0);
+            }
+            let entry = caller
+                .data()
+                .chunk_registry()
+                .lock()
+                .unwrap()
+                .get(crate::chunk::ChunkCoord { x: chunk_x, z: chunk_z })
+                .cloned();
+            let Some(entry) = entry else {
+                return Ok(0);
+            };
+            let bytes = entry.peer_id.as_bytes();
+            let n = bytes.len().min(out_peer_len as usize);
+            mem.write(&mut caller, out_peer_ptr as usize, &bytes[..n])?;
+            Ok(1)
+        },
+    )?;
+
     Ok(())
 }

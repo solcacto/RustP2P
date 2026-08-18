@@ -4,6 +4,22 @@
 //! set the RustP2P host registers). On native they read/write an in-memory
 //! [`MockState`] so the SDK can be unit-tested without a wasm runtime.
 
+/// A 16-byte pose layout matching the host wire format.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(C)]
+pub struct Pose {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub rot_y: f32,
+}
+
+impl Pose {
+    pub const fn zero() -> Self {
+        Self { x: 0.0, y: 0.0, z: 0.0, rot_y: 0.0 }
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 mod imp {
     use super::Pose;
@@ -33,6 +49,8 @@ mod imp {
             pub fn set_tag_score(score: u32);
             pub fn broadcast_tag_score(score: u32);
             pub fn load_avatar(path_ptr: *const u8, path_len: usize) -> i32;
+            pub fn broadcast_chunk_claim(origin_x: i32, origin_z: i32, extent_x: i32, extent_z: i32);
+            pub fn get_chunk_owner(chunk_x: i32, chunk_z: i32, out_peer_ptr: *mut u8, out_peer_len: usize) -> i32;
         }
     }
 
@@ -93,13 +111,26 @@ mod imp {
     pub fn load_avatar(path: &[u8]) -> bool {
         unsafe { raw::load_avatar(path.as_ptr(), path.len()) != 0 }
     }
+
+    pub fn broadcast_chunk_claim(origin_x: i32, origin_z: i32, extent_x: i32, extent_z: i32) {
+        unsafe { raw::broadcast_chunk_claim(origin_x, origin_z, extent_x, extent_z) };
+    }
+
+    pub fn get_chunk_owner(chunk_x: i32, chunk_z: i32, buffer: &mut [u8]) -> Option<usize> {
+        if buffer.is_empty() {
+            return None;
+        }
+        let n = unsafe { raw::get_chunk_owner(chunk_x, chunk_z, buffer.as_mut_ptr(), buffer.len()) };
+        if n != 0 { Some(n as usize) } else { None }
+    }
 }
 
 /// Native test double: records what the game asked for and feeds it back.
 #[cfg(not(target_arch = "wasm32"))]
 mod imp {
     use super::Pose;
-    use std::sync::Mutex;
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
 
     /// Shared mock state driven by `guest_sdk` unit tests.
     #[derive(Default)]
@@ -122,28 +153,11 @@ mod imp {
         pub avatar_path: Option<String>,
         pub sent_messages: Vec<(String, Vec<u8>)>,
         pub received_messages: Vec<Vec<u8>>,
+        pub chunk_claims: Vec<(i32, i32, i32, i32)>,
+        pub chunk_owners: HashMap<(i32, i32), String>,
     }
 
-    static MOCK: Mutex<MockState> = Mutex::new(MockState {
-        frame_count: 0,
-        move_up: false,
-        move_down: false,
-        move_left: false,
-        move_right: false,
-        action_1: false,
-        action_2: false,
-        gamepad_connected: false,
-        gamepad_axis_x: 0.0,
-        gamepad_axis_y: 0.0,
-        movement_axis: 0,
-        avatar: [0.0; 4],
-        last_pose: None,
-        remote_pose: None,
-        last_score: None,
-        avatar_path: None,
-        sent_messages: Vec::new(),
-        received_messages: Vec::new(),
-    });
+    static MOCK: LazyLock<Mutex<MockState>> = LazyLock::new(|| Mutex::new(MockState::default()));
 
     /// Grants exclusive access to the mock state (for tests).
     pub fn mock() -> std::sync::MutexGuard<'static, MockState> {
@@ -209,22 +223,20 @@ mod imp {
         MOCK.lock().unwrap().avatar_path = Some(path);
         true
     }
+
+    pub fn broadcast_chunk_claim(origin_x: i32, origin_z: i32, extent_x: i32, extent_z: i32) {
+        let mut s = MOCK.lock().unwrap();
+        s.chunk_claims.push((origin_x, origin_z, extent_x, extent_z));
+    }
+
+    pub fn get_chunk_owner(chunk_x: i32, chunk_z: i32, buffer: &mut [u8]) -> Option<usize> {
+        let s = MOCK.lock().unwrap();
+        let owner = s.chunk_owners.get(&(chunk_x, chunk_z))?;
+        let bytes = owner.as_bytes();
+        let n = bytes.len().min(buffer.len());
+        buffer[..n].copy_from_slice(&bytes[..n]);
+        Some(n)
+    }
 }
 
 pub use imp::*;
-
-/// A 16-byte pose layout matching the host wire format.
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[repr(C)]
-pub struct Pose {
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-    pub rot_y: f32,
-}
-
-impl Pose {
-    pub const fn zero() -> Self {
-        Self { x: 0.0, y: 0.0, z: 0.0, rot_y: 0.0 }
-    }
-}

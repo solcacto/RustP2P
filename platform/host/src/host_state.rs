@@ -5,8 +5,10 @@
 //! through `Caller::data()` / `Caller::data_mut()`.
 
 use crate::avatar_state::{AvatarPose, AvatarState};
+use crate::chunk::{ChunkClaim, ChunkCoord, ChunkDht};
 use crate::input_state::InputState;
 use crate::peer_connection::PeerConnection;
+use anyhow::Result;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -86,6 +88,10 @@ pub struct HostState {
     signaling_next_retry: Option<Instant>,
     /// Avatar asset path (relative to the host asset folder) currently in use.
     avatar_path: String,
+    /// Shared kad-style DHT mapping chunk coordinates to hosting peers.
+    chunk_registry: Arc<Mutex<ChunkDht>>,
+    /// The local peer's own chunk claims (what it hosts for the world).
+    owned_chunks: Vec<ChunkCoord>,
 }
 
 impl HostState {
@@ -118,6 +124,8 @@ impl HostState {
             last_signaling_probe: None,
             signaling_next_retry: None,
             avatar_path: "avatar_standard.glb".to_string(),
+            chunk_registry: Arc::new(Mutex::new(ChunkDht::new())),
+            owned_chunks: Vec::new(),
         }
     }
 
@@ -326,5 +334,44 @@ impl HostState {
     /// Returns the avatar asset path currently in use.
     pub fn avatar_path(&self) -> &str {
         &self.avatar_path
+    }
+
+    /// Returns the shared chunk DHT (chunk coordinate → hosting peer).
+    pub fn chunk_registry(&self) -> &Arc<Mutex<ChunkDht>> {
+        &self.chunk_registry
+    }
+
+    /// Replaces the shared chunk DHT (used by tests and the renderer).
+    pub fn set_chunk_registry(&mut self, dht: Arc<Mutex<ChunkDht>>) {
+        self.chunk_registry = dht;
+    }
+
+    /// The chunk coordinates this peer currently hosts.
+    pub fn owned_chunks(&self) -> &[ChunkCoord] {
+        &self.owned_chunks
+    }
+
+    /// Claims a rectangular region of chunks on behalf of the local peer:
+    /// records the ownership in the local DHT and broadcasts the claim to
+    /// every known peer over the P2P mesh.
+    pub fn claim_chunk_region(&mut self, origin: ChunkCoord, extent: (u32, u32)) -> Result<()> {
+        let claim = ChunkClaim::region(self.peer_id.clone(), origin, extent);
+        self.owned_chunks = claim.coords();
+        let address = match self.peer_connection() {
+            Some(pc) => pc.local_addr()?,
+            None => "127.0.0.1:0".parse().expect("valid placeholder address"),
+        };
+        self.chunk_registry.lock().unwrap().apply_claim(&claim, address);
+        if let Some(pc) = self.peer_connection() {
+            pc.send_to_all(&claim.wire_bytes())?;
+        }
+        Ok(())
+    }
+
+    /// Claims the chunk containing `(x, z)` plus the adjacent chunk to +X
+    /// (the classic "I am hosting chunks X,Y and X+1,Y" claim).
+    pub fn claim_around_position(&mut self, x: f32, z: f32) -> Result<()> {
+        let origin = ChunkCoord::at(x, z);
+        self.claim_chunk_region(origin, (2, 1))
     }
 }
