@@ -6,6 +6,16 @@ default-run = "main"
 
 [dependencies]
 anyhow = "1"
+bevy = { version = "0.14", default-features = false, features = [
+    "bevy_winit",
+    "bevy_render",
+    "bevy_pbr",
+    "bevy_gltf",
+    "bevy_asset",
+    "bevy_scene",
+    "multi_threaded",
+] }
+gltf = "1.4"
 serde_json = "1"
 signaling_server = { path = "../signaling_server" }
 tungstenite = "0.26"

@@ -162,5 +162,20 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<()> {
         },
     )?;
 
+    linker.func_wrap(
+        "env",
+        "update_avatar_transform",
+        |caller: Caller<'_, HostState>, x: f32, y: f32, z: f32, rot_y: f32| -> Result<()> {
+            if let Some(avatar) = caller.data().avatar_state() {
+                let mut pose = avatar.lock().unwrap();
+                pose.x = x;
+                pose.y = y;
+                pose.z = z;
+                pose.rot_y = rot_y;
+            }
+            Ok(())
+        },
+    )?;
+
     Ok(())
 }

@@ -1,6 +1,8 @@
+use crate::avatar_state::AvatarState;
 use crate::input_state::InputState;
 use crate::peer_connection::PeerConnection;
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 pub struct HostState {
@@ -15,6 +17,7 @@ pub struct HostState {
     peer_connection: Option<PeerConnection>,
     connected_peers: Vec<String>,
     incoming_messages: VecDeque<Vec<u8>>,
+    avatar_state: Option<Arc<Mutex<AvatarState>>>,
 }
 
 impl HostState {
@@ -32,6 +35,7 @@ impl HostState {
             peer_connection: None,
             connected_peers: Vec::new(),
             incoming_messages: VecDeque::new(),
+            avatar_state: None,
         }
     }
 
@@ -108,5 +112,13 @@ impl HostState {
 
     pub fn incoming_messages_mut(&mut self) -> &mut VecDeque<Vec<u8>> {
         &mut self.incoming_messages
+    }
+
+    pub fn set_avatar_state(&mut self, state: Option<Arc<Mutex<AvatarState>>>) {
+        self.avatar_state = state;
+    }
+
+    pub fn avatar_state(&self) -> Option<&Arc<Mutex<AvatarState>>> {
+        self.avatar_state.as_ref()
     }
 }
