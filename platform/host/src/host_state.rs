@@ -1,4 +1,5 @@
 use crate::input_state::InputState;
+use crate::peer_connection::PeerConnection;
 use std::time::Instant;
 
 pub struct HostState {
@@ -9,18 +10,25 @@ pub struct HostState {
     delta_time: f64,
     input_state: InputState,
     previous_input_state: InputState,
+    peer_id: String,
+    peer_connection: Option<PeerConnection>,
+    connected_peers: Vec<String>,
 }
 
 impl HostState {
     pub fn new(name: impl Into<String>) -> Self {
+        let name = name.into();
         Self {
             counter: 0,
-            name: name.into(),
+            peer_id: name.clone(),
+            name,
             frame_count: 0,
             last_frame_time: Instant::now(),
             delta_time: 0.0,
             input_state: InputState::default(),
             previous_input_state: InputState::default(),
+            peer_connection: None,
+            connected_peers: Vec::new(),
         }
     }
 
@@ -65,5 +73,29 @@ impl HostState {
 
     pub fn previous_input(&self) -> &InputState {
         &self.previous_input_state
+    }
+
+    pub fn peer_id(&self) -> &str {
+        &self.peer_id
+    }
+
+    pub fn set_peer_connection(&mut self, pc: Option<PeerConnection>) {
+        self.peer_connection = pc;
+    }
+
+    pub fn peer_connection(&self) -> Option<&PeerConnection> {
+        self.peer_connection.as_ref()
+    }
+
+    pub fn peer_connection_mut(&mut self) -> Option<&mut PeerConnection> {
+        self.peer_connection.as_mut()
+    }
+
+    pub fn connected_peers(&self) -> &[String] {
+        &self.connected_peers
+    }
+
+    pub fn connected_peers_mut(&mut self) -> &mut Vec<String> {
+        &mut self.connected_peers
     }
 }

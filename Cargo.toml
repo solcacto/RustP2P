@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["host", "guest"]
+members = ["platform/host", "platform/guest", "platform/signaling_server"]
 
 [workspace.package]
 version = "0.1.0"
