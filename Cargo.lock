@@ -2269,6 +2269,25 @@ name = "guest"
 version = "0.1.0"
 
 [[package]]
+name = "guest-sdk"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "guest-sdk-macros",
+ "hex",
+ "sha2",
+]
+
+[[package]]
+name = "guest-sdk-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "guillotiere"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

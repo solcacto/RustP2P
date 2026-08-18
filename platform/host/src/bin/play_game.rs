@@ -17,7 +17,6 @@ use wasmtime::{Engine, Linker, Module, Store};
 const SIGNAL_SERVER: &str = "127.0.0.1:9001";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const GAME_PACKAGE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../guest");
-const MANIFEST_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../guest/game_manifest.json");
 const AVATAR_ASSET_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets");
 
 /// Commit 17: loads a game *package* — a `game_manifest.json` plus its Wasm —
@@ -33,7 +32,7 @@ fn main() -> Result<()> {
         .map(|i| args[i + 1].clone())
         .unwrap_or_else(|| "A".to_string());
     if role != "A" && role != "B" {
-        bail!("usage: play_game --role A|B [--cid <CID>] [--ipfs <api>] [--avatar <path>] [--cosmetic <manifest>] [--auto] [--frames N] [--no-exit]");
+        bail!("usage: play_game --role A|B [--cid <CID> | --package <dir>] [--ipfs <api>] [--avatar <path>] [--cosmetic <manifest>] [--auto] [--frames N] [--no-exit]");
     }
     let local_id = format!("Peer{role}");
     let remote_id = if role == "A" { "PeerB" } else { "PeerA" };
@@ -49,6 +48,13 @@ fn main() -> Result<()> {
     let cid = args
         .iter()
         .position(|a| a == "--cid")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
+    // Load a game from an arbitrary local package directory instead of the
+    // default guest dir (used for SDK-scaffolded games).
+    let package_arg = args
+        .iter()
+        .position(|a| a == "--package")
         .and_then(|i| args.get(i + 1))
         .cloned();
     // IPFS node API to use for downloads (defaults to the local Kubo node).
@@ -82,18 +88,27 @@ fn main() -> Result<()> {
     let remote_avatars: Arc<Mutex<HashMap<String, AvatarPose>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
-    // Determine the game package location: from IPFS by CID, or the local
-    // guest directory.
+    // Determine the game package location: from IPFS by CID, an explicit
+    // --package directory, or the local guest directory.
     let (package_dir, manifest_path): (std::path::PathBuf, std::path::PathBuf) = match &cid {
         Some(cid) => {
             let ipfs = host::ipfs::IpfsClient::new(&ipfs_api);
             let game_dir = fetch_game_from_ipfs(&ipfs, cid)?;
             (game_dir.clone(), game_dir.join("game_manifest.json"))
         }
-        None => (
-            std::path::PathBuf::from(GAME_PACKAGE_DIR),
-            std::path::PathBuf::from(MANIFEST_PATH),
-        ),
+        None => {
+            let dir = package_arg
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from(GAME_PACKAGE_DIR));
+            let manifest = dir.join("game_manifest.json");
+            if !manifest.exists() {
+                bail!(
+                    "no game_manifest.json in {} — use --cid, --package, or build the guest",
+                    dir.display()
+                );
+            }
+            (dir, manifest)
+        }
     };
 
     // Load and validate the game package manifest, then load the Wasm it pins
@@ -216,16 +231,23 @@ fn main() -> Result<()> {
     }
     drop(guard);
 
-    // Post-run verification.
+    // Post-run verification. Guest diagnostics exports are optional (the SDK
+    // games don't emit them); host-side state is authoritative.
     let rendered = store_handle.lock().unwrap().data().frame_count();
     println!("[{role}] rendered {rendered} frames");
     let mut guard = store_handle.lock().unwrap();
-    let guest_score =
-        instance.get_typed_func::<(), i32>(&mut *guard, "get_tag_score")?.call(&mut *guard, ())?;
+    let guest_score = instance
+        .get_typed_func::<(), i32>(&mut *guard, "get_tag_score")
+        .ok()
+        .and_then(|f| f.call(&mut *guard, ()).ok())
+        .unwrap_or(0);
     let seen = instance
-        .get_typed_func::<(), i32>(&mut *guard, "remote_pose_seen")?
-        .call(&mut *guard, ())?;
+        .get_typed_func::<(), i32>(&mut *guard, "remote_pose_seen")
+        .ok()
+        .and_then(|f| f.call(&mut *guard, ()).ok())
+        .unwrap_or(0);
     let local = guard.data().tag_score();
+    let remote_pose_count = guard.data().remote_avatars().lock().unwrap().len();
     let remote_scores: Vec<String> = guard
         .data()
         .remote_scores()
@@ -236,17 +258,17 @@ fn main() -> Result<()> {
         .collect();
     println!(
         "[{role}] guest score: {guest_score} | host score: {local} | \
-         remote scores: {remote_scores:?} | remote_pose_seen: {seen}"
+         remote scores: {remote_scores:?} | remote_pose_seen: {seen} (peers: {remote_pose_count})"
     );
 
     if rendered < frames.saturating_div(2).max(30) as u64 {
         bail!("[{role}] renderer produced too few frames ({rendered})");
     }
     if auto {
-        if guest_score == 0 {
+        if local == 0 && guest_score == 0 {
             bail!("[{role}] tag score never incremented (proximity mechanic failed)");
         }
-        if seen == 0 {
+        if seen == 0 && remote_pose_count == 0 {
             bail!("[{role}] guest never observed the remote avatar");
         }
     }

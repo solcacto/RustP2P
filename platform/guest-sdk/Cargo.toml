@@ -1,0 +1,10 @@
+[package]
+name = "guest-sdk"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = "1"
+guest-sdk-macros = { path = "../guest-sdk-macros" }
+hex = "0.4"
+sha2 = "0.10"

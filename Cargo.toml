@@ -1,6 +1,13 @@
 [workspace]
 resolver = "2"
-members = ["platform/host", "platform/guest", "platform/registry_server", "platform/signaling_server"]
+members = [
+    "platform/host",
+    "platform/guest",
+    "platform/guest-sdk",
+    "platform/guest-sdk-macros",
+    "platform/registry_server",
+    "platform/signaling_server",
+]
 
 [workspace.package]
 version = "0.1.0"

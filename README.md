@@ -62,7 +62,11 @@ Key properties:
 ```
 .
 ├── platform/
-│   ├── guest/                 # The game — a Rust crate compiled to Wasm
+│   ├── guest-sdk/             # Safe ergonomic SDK for game developers
+│   │   ├── templates/         #   session-shooter, open-world templates
+│   │   └── src/bin/create_game.rs  # `cargo new --template`-style scaffold tool
+│   ├── guest-sdk-macros/      # Proc-macro crate (#[export(MyGame)])
+│   ├── guest/                 # The Chase Tag reference game — Rust compiled to Wasm
 │   │   ├── src/lib.rs         #   Chase/Tag logic (no_std, core only)
 │   │   ├── guest.wasm         #   Committed, hash-pinned game artifact
 │   │   └── game_manifest.json #   Game package manifest (pins the wasm hash)
@@ -157,9 +161,110 @@ cargo run -p host --bin play_game -- --role A
 cargo run -p host --bin play_game -- --role B
 ```
 
+### Controls
+
+| Key                 | Action                        |
+|---------------------|-------------------------------|
+| `W` / `S` / `A` / `D` | Move forward / back / left / right |
+| `Space`             | Rotate right                  |
+| `Shift` (left)      | Rotate left                   |
+
+Each window shows your avatar, a blue-tinted clone of the remote player's
+avatar, and the HUD `Local Score: X | Remote Score: Y`. A tag registers when
+the two avatars come within **2.0 units** of each other.
+
+### Avatar customization
+
+The avatar is loaded from a configurable path (relative to the host asset
+folder) and validated against the avatar standard before the game starts, and
+the guest can change it at runtime through `load_avatar`. Cosmetics are
+**signed packages**: the host verifies the creator's ed25519 signature over the
+manifest + mesh before rendering, and silently skips invalid ones.
+
+```sh
+# player A: default avatar, verified golden sword on the right hand
+cargo run -p host --bin play_game -- --role A \
+  --cosmetic cosmetics/golden_sword/cosmetic_manifest.json
+
+# player B: a different, blue avatar with a signed hat on the head
+cargo run -p host --bin play_game -- --role B \
+  --avatar avatars/blue.glb \
+  --cosmetic cosmetics/simple_hat/cosmetic_manifest.json
+```
+
+Author a cosmetic package (generates the mesh glb + signs it):
+
+```sh
+cargo run -p host --bin make_cosmetic -- \
+  --kind sword --item my_sword_v1 --point RightHand \
+  --out assets/cosmetics/my_sword
+```
+
+### Headless / automated verification
+
+Both players can be driven by scripted input for CI-style verification (role A
+auto-drives toward role B and tags):
+
+```sh
+cargo run -p host --bin play_game -- --role A --auto --frames 240
+cargo run -p host --bin play_game -- --role B --auto --frames 240
+```
+
+Additional flags: `--frames N` (auto-exit after N frames, default 900) and
+`--no-exit` (run until the window is closed).
+
+
+## Guest SDK & game templates
+
+Non-Rust developers don't touch wasm. The **guest SDK** (`platform/guest-sdk`)
+wraps every raw host function in a safe, ergonomic Rust API:
+
+```rust
+use guest_sdk::prelude::*;
+
+struct MyGame { x: f32, z: f32 }
+
+impl Game for MyGame {
+    fn new() -> Self { Self { x: 0.0, z: 0.0 } }
+    fn tick(&mut self, ctx: &mut Context) {
+        let input = ctx.input();
+        if input.up { self.z -= 0.05; }
+        ctx.set_avatar_transform(self.x, 0.0, self.z, 0.0);
+        ctx.broadcast_pose(self.x, 0.0, self.z, 0.0);
+    }
+}
+
+#[export(MyGame)]
+fn game_tick() {}
+```
+
+`Context` exposes input, avatar pose, network, pose sync, scoring, and avatar
+selection; the `#[export]` attribute turns a function into the wasm entry point
+and the SDK dispatches every tick to a single persistent game instance.
+
+**Scaffold a game from a template** (the `cargo new --template` equivalent):
+
+```sh
+cargo run -p guest-sdk --bin create_game -- \
+  --template session-shooter --name my_shooter --author solcacto
+# templates: session-shooter, open-world
+
+# play it:
+cargo run -p host --bin play_game -- --role A --package platform/games/my_shooter
+```
+
+`create_game` copies the template, compiles it to wasm, and writes a
+`game_manifest.json` pinned to the built wasm's SHA-256 — a ready-to-play,
+self-contained game package.
+
 ## Decentralized distribution (IPFS)
 
 Games are distributed peer-to-peer, not from a server. A game is bundled into
+a `.tar` (`guest.wasm` + `game_manifest.json` + assets) and pinned on a local
+**Kubo/IPFS node**; its **CID is the game's permanent address**. Players fetch
+the exact same bytes from the swarm by that CID.
+
+
 a `.tar` (`guest.wasm` + `game_manifest.json` + assets) and pinned on a local
 **Kubo/IPFS node**; its **CID is the game's permanent address**. Players fetch
 the exact same bytes from the swarm by that CID.
@@ -236,64 +341,12 @@ cargo run -p host --bin play_game -- --role A --cid <CID>
 The `discovery_test` verifies list → download → verify against a running
 registry + IPFS node.
 
-### Controls
-
-| Key                 | Action                        |
-|---------------------|-------------------------------|
-| `W` / `S` / `A` / `D` | Move forward / back / left / right |
-| `Space`             | Rotate right                  |
-| `Shift` (left)      | Rotate left                   |
-
-Each window shows your avatar, a blue-tinted clone of the remote player's
-avatar, and the HUD `Local Score: X | Remote Score: Y`. A tag registers when
-the two avatars come within **2.0 units** of each other.
-
-### Avatar customization
-
-The avatar is loaded from a configurable path (relative to the host asset
-folder) and validated against the avatar standard before the game starts, and
-the guest can change it at runtime through `load_avatar`. Cosmetics are
-**signed packages**: the host verifies the creator's ed25519 signature over the
-manifest + mesh before rendering, and silently skips invalid ones.
-
-```sh
-# player A: default avatar, verified golden sword on the right hand
-cargo run -p host --bin play_game -- --role A \
-  --cosmetic cosmetics/golden_sword/cosmetic_manifest.json
-
-# player B: a different, blue avatar with a signed hat on the head
-cargo run -p host --bin play_game -- --role B \
-  --avatar avatars/blue.glb \
-  --cosmetic cosmetics/simple_hat/cosmetic_manifest.json
-```
-
-Author a cosmetic package (generates the mesh glb + signs it):
-
-```sh
-cargo run -p host --bin make_cosmetic -- \
-  --kind sword --item my_sword_v1 --point RightHand \
-  --out assets/cosmetics/my_sword
-```
-
-### Headless / automated verification
-
-Both players can be driven by scripted input for CI-style verification (role A
-auto-drives toward role B and tags):
-
-```sh
-cargo run -p host --bin play_game -- --role A --auto --frames 240
-cargo run -p host --bin play_game -- --role B --auto --frames 240
-```
-
-Additional flags: `--frames N` (auto-exit after N frames, default 900) and
-`--no-exit` (run until the window is closed).
-
----
 
 ## Test suite
 
 Each framework test is a binary under `platform/host/src/bin/`; the networking
-tests need the signaling server running first.
+tests need the signaling server running first. The guest SDK has its own unit
+tests (`cargo test -p guest-sdk`).
 
 ```sh
 cargo run -p host                                   # host-state smoke test
