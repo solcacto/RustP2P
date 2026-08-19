@@ -22,7 +22,10 @@ use bevy::gltf::GltfAssetLabel;
 use bevy::input::keyboard::{KeyboardInput, KeyCode};
 use bevy::input::ButtonState;
 use bevy::log::LogPlugin;
-use bevy::pbr::{DirectionalLightBundle, PbrPlugin, StandardMaterial};
+use bevy::pbr::{
+    DirectionalLight, DirectionalLightBundle, DirectionalLightShadowMap, NotShadowCaster, PbrPlugin,
+    StandardMaterial,
+};
 use bevy::prelude::*;
 use bevy::render::pipelined_rendering::PipelinedRenderingPlugin;
 use bevy::render::RenderPlugin;
@@ -70,9 +73,23 @@ pub struct RemoteAvatarsHandle(
 #[derive(Resource, Clone)]
 pub struct AvatarMeshHandle(pub Handle<Mesh>);
 
-/// Shared material for the local avatar (enables draw-call batching).
+/// Shared materials keyed by avatar path: choosing `--avatar`/`load_avatar`
+/// picks a different body color, but each variant is a single shared material so
+/// draw-call batching is preserved.
 #[derive(Resource, Clone)]
-pub struct AvatarMaterialHandle(pub Handle<StandardMaterial>);
+pub struct AvatarMaterialPalette {
+    /// One shared material per avatar asset path (same geometry, different color).
+    pub by_path: HashMap<String, Handle<StandardMaterial>>,
+    /// Fallback material for unknown paths.
+    pub default: Handle<StandardMaterial>,
+}
+
+impl AvatarMaterialPalette {
+    /// Resolves the material for an avatar path (falling back to the default).
+    pub fn material(&self, path: &str) -> Handle<StandardMaterial> {
+        self.by_path.get(path).cloned().unwrap_or_else(|| self.default.clone())
+    }
+}
 
 /// Shared material for every remote avatar (blue, all instances batched).
 #[derive(Resource, Clone)]
@@ -728,7 +745,7 @@ fn sync_avatar_scene(
     runtime: Res<WasmRuntime>,
     mut commands: Commands,
     avatar_mesh: Res<AvatarMeshHandle>,
-    avatar_material: Res<AvatarMaterialHandle>,
+    palette: Res<AvatarMaterialPalette>,
     avatars: Query<(Entity, &AvatarSource), With<Avatar>>,
 ) {
     let desired = runtime.store.lock().unwrap().data().avatar_path().to_string();
@@ -738,24 +755,25 @@ fn sync_avatar_scene(
         }
         Some((entity, _)) => {
             commands.entity(entity).despawn();
-            spawn_avatar(&mut commands, &avatar_mesh.0, &avatar_material.0, desired);
+            spawn_avatar(&mut commands, &avatar_mesh.0, &palette, desired);
         }
-        None => spawn_avatar(&mut commands, &avatar_mesh.0, &avatar_material.0, desired),
+        None => spawn_avatar(&mut commands, &avatar_mesh.0, &palette, desired),
     }
 }
 
 /// Spawns the local avatar as a single batched mesh entity (one draw call),
-/// mirroring the pose applied by `apply_avatar_pose`.
+/// tinted by the avatar-path material palette, mirroring the pose applied by
+/// `apply_avatar_pose`.
 fn spawn_avatar(
     commands: &mut Commands,
     mesh: &Handle<Mesh>,
-    material: &Handle<StandardMaterial>,
+    palette: &AvatarMaterialPalette,
     path: String,
 ) {
     commands.spawn((
         MaterialMeshBundle {
             mesh: mesh.clone(),
-            material: material.clone(),
+            material: palette.material(&path),
             transform: Transform::from_xyz(0.0, 0.0, 0.0),
             ..default()
         },
@@ -872,6 +890,8 @@ fn sync_remote_avatars(
                     RemoteAvatar,
                     RemotePeerId(peer_id.clone()),
                     AvatarSource(avatar_path.clone()),
+                    // Only the local avatar casts shadows (cheaper shadow pass).
+                    NotShadowCaster,
                 ));
             }
         }
@@ -901,16 +921,18 @@ fn setup_scene(
         ..default()
     });
 
-    // Single directional light, shadows disabled for speed.
+    // Single directional light; shadows on (modest 1024 map).
     commands.spawn(DirectionalLightBundle {
         directional_light: DirectionalLight {
-            shadows_enabled: false,
+            shadows_enabled: true,
+            shadow_depth_bias: 0.5,
             illuminance: 8000.0,
             ..default()
         },
         transform: Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.7, 0.4, 0.0)),
         ..default()
     });
+    commands.insert_resource(DirectionalLightShadowMap { size: 1024 });
 
     commands.spawn(MaterialMeshBundle {
         mesh: meshes.add(Plane3d::default().mesh().size(20.0, 20.0)),
@@ -922,24 +944,43 @@ fn setup_scene(
         ..default()
     });
 
-    // One merged low-poly avatar mesh and two shared materials: every avatar
-    // (local and remote) renders with these, so Bevy batches all of them into
-    // a handful of draw calls.
+    // One merged low-poly avatar mesh. The local avatar's material is chosen
+    // from a palette keyed by avatar path (restores `--avatar`/`load_avatar`
+    // color variants, e.g. standard vs blue), and every remote avatar shares a
+    // single blue material — so all avatars batch into a handful of draw calls.
     let avatar_mesh = meshes.add(build_avatar_mesh());
-    let local_material = materials.add(StandardMaterial {
-        base_color: Color::srgb_u8(200, 205, 215),
-        perceptual_roughness: 0.55,
-        metallic: 0.0,
-        ..default()
-    });
+    let palette = AvatarMaterialPalette {
+        by_path: HashMap::from([
+            (
+                "avatar_standard.glb".to_string(),
+                materials.add(StandardMaterial {
+                    base_color: Color::srgb(0.72, 0.72, 0.78),
+                    perceptual_roughness: 0.85,
+                    ..default()
+                }),
+            ),
+            (
+                "avatars/blue.glb".to_string(),
+                materials.add(StandardMaterial {
+                    base_color: Color::srgb(0.20, 0.35, 0.95),
+                    perceptual_roughness: 0.85,
+                    ..default()
+                }),
+            ),
+        ]),
+        default: materials.add(StandardMaterial {
+            base_color: Color::srgb_u8(200, 205, 215),
+            perceptual_roughness: 0.85,
+            ..default()
+        }),
+    };
     let remote_material = materials.add(StandardMaterial {
-        base_color: Color::srgb_u8(80, 130, 255),
-        perceptual_roughness: 0.55,
-        metallic: 0.0,
+        base_color: Color::srgb(0.20, 0.35, 0.95),
+        perceptual_roughness: 0.85,
         ..default()
     });
     commands.insert_resource(AvatarMeshHandle(avatar_mesh));
-    commands.insert_resource(AvatarMaterialHandle(local_material));
+    commands.insert_resource(palette);
     commands.insert_resource(RemoteMaterialHandle(remote_material));
 
     commands.spawn((

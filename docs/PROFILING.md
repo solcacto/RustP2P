@@ -78,14 +78,19 @@ data drove the Commit 27 optimizations:
 
 - Avatars render as a **single merged low-poly mesh** (one entity, one draw
   call) instead of full glb scenes (61 entities each), with **shared
-  materials** (one local, one blue remote) so all avatars batch.
-- **Shadows disabled** and the single directional light kept cheap.
+  materials** so all avatars batch.
+- **Shadows** are enabled (1024 map) with only the local avatar casting.
 - **Continuous updates + no vsync** (`WinitSettings::Continuous`,
   `PresentMode::Immediate`) so the loop isn't capped at 60 Hz.
 - **Render diagnostics** (`RenderDiagnosticsPlugin`) show render passes are
   ~0.04 ms; a **frustum-culling / batching** debug system logs visible vs
   culled entities and unique material count.
 
-Result (debug build, Apple M1): average frame time **18.75 ms → 7.9 ms
-(126 FPS)**; only 2 unique materials, ~4 visible entities. The remaining frame
+Avatar **color variants were restored** after the optimization: the shared
+material is now a palette keyed by avatar path (`avatar_standard.glb` = gray,
+`avatars/blue.glb` = blue), so `--avatar`/`load_avatar` visibly change the
+local avatar again while keeping batching (still 3 unique materials).
+
+Result (Apple M1): average frame time **18.75 ms → 7.9 ms debug (124 FPS) /
+3.5 ms release (284 FPS)** with shadows + palette restored. The remaining frame
 time is macOS window-server pacing, not render work.
