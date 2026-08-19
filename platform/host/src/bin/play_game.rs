@@ -47,13 +47,28 @@ fn asset_dir() -> std::path::PathBuf {
 
 /// The downloaded-game cache: prefer the sibling `games/` folder of this
 /// executable when writable (e.g. unpacked from a DMG/zip), otherwise a
-/// user-writable cache directory (the DMG volume itself is read-only).
+/// user-writable cache directory (a mounted DMG volume is read-only even
+/// though a bundled `games/` folder exists).
 fn games_dir() -> std::path::PathBuf {
     let sibling = exe_dir().join("games");
-    if sibling.exists() || std::fs::create_dir_all(&sibling).is_ok() {
+    if writable_dir(&sibling) {
         sibling
     } else {
         user_cache_dir()
+    }
+}
+
+/// Creates `dir` (if needed) and confirms it can actually hold a file, so a
+/// folder that merely *exists* on a read-only volume is not mistaken for a
+/// usable cache.
+fn writable_dir(dir: &std::path::Path) -> bool {
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(".write_test");
+    match std::fs::File::create(&probe) {
+        Ok(_) => std::fs::remove_file(&probe).is_ok(),
+        Err(_) => false,
     }
 }
 
