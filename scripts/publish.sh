@@ -112,4 +112,4 @@ echo
 echo "Next: add this game to your GitHub Pages games.json (registry_url in"
 echo "platform/host/config.toml), e.g.:"
 echo '  {"name":"<game>","cid":"'"$CID"'","description":"...","author":"you","mode":"session"}'
-echo "Then players can: cargo run -p host --bin launcher -- --cid $CID"
+echo "Then players can: cargo run -p host --bin launcher_cli -- --cid $CID"
