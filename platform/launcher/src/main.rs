@@ -81,6 +81,13 @@ impl LauncherApp {
         let games = self.games.clone();
         std::thread::spawn(move || {
             let result = fetch_registry(REGISTRY_URL);
+            match &result {
+                Ok(list) => {
+                    let names: Vec<&str> = list.iter().map(|g| g.name.as_str()).collect();
+                    println!("[launcher] registry fetch OK: {} games = {:?}", list.len(), names);
+                }
+                Err(e) => println!("[launcher] registry fetch FAILED: {e:#}"),
+            }
             *games.lock().unwrap() = Some(result);
         });
         self.status = "Refreshing game registry…".to_string();
@@ -172,8 +179,9 @@ impl LauncherApp {
 
 impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Auto-refresh on first frame.
-        if self.last_refresh.is_none() {
+        // Auto-refresh on first frame, then periodically so a stale first
+        // fetch (e.g. a slow CDN propagation) self-corrects.
+        if self.last_refresh.map_or(true, |t| t.elapsed() >= Duration::from_secs(30)) {
             self.refresh();
             self.last_refresh = Some(Instant::now());
         }
