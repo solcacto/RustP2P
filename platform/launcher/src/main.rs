@@ -57,6 +57,8 @@ struct LauncherApp {
     /// Last action/error message shown in the status bar.
     status: String,
     last_refresh: Option<Instant>,
+    /// Whether the window size has been logged (one-time diagnostic).
+    logged_size: bool,
 }
 
 impl Default for LauncherApp {
@@ -70,6 +72,7 @@ impl Default for LauncherApp {
             pending_role: None,
             status: String::new(),
             last_refresh: None,
+            logged_size: false,
         }
     }
 }
@@ -82,13 +85,33 @@ impl LauncherApp {
         let games = self.games.clone();
         let refreshing = self.refreshing.clone();
         std::thread::spawn(move || {
+            let started = std::time::Instant::now();
             let result = fetch_registry(REGISTRY_URL);
-            match &result {
+            let line = match &result {
                 Ok(list) => {
                     let names: Vec<&str> = list.iter().map(|g| g.name.as_str()).collect();
-                    println!("[launcher] registry fetch OK: {} games = {:?}", list.len(), names);
+                    format!(
+                        "[{}] fetch OK: {} games = {:?} ({} ms)",
+                        std::process::id(),
+                        list.len(),
+                        names,
+                        started.elapsed().as_millis()
+                    )
                 }
-                Err(e) => println!("[launcher] registry fetch FAILED: {e:#}"),
+                Err(e) => format!(
+                    "[{}] fetch FAILED: {e:#} ({} ms)",
+                    std::process::id(),
+                    started.elapsed().as_millis()
+                ),
+            };
+            println!("[launcher] {line}");
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/launcher_fetch.log")
+            {
+                use std::io::Write;
+                let _ = writeln!(f, "{line}");
             }
             *games.lock().unwrap() = Some(result);
             refreshing.store(false, Ordering::SeqCst);
@@ -187,6 +210,27 @@ impl eframe::App for LauncherApp {
         if self.last_refresh.is_none_or(|t| t.elapsed() >= Duration::from_secs(30)) {
             self.refresh();
             self.last_refresh = Some(Instant::now());
+        }
+
+        // One-time diagnostic: log the window size we actually got.
+        if !self.logged_size {
+            self.logged_size = true;
+            let r = ctx.screen_rect();
+            let line = format!(
+                "[{}] window inner = {}x{}",
+                std::process::id(),
+                r.width() as i32,
+                r.height() as i32
+            );
+            println!("[launcher] {line}");
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/launcher_fetch.log")
+            {
+                use std::io::Write;
+                let _ = writeln!(f, "{line}");
+            }
         }
 
         // Drain the child log into the UI buffer and reap a finished child.
@@ -375,9 +419,11 @@ impl LauncherApp {
                 .to_uppercase();
             let hue = (game.name.bytes().fold(0u32, |a, b| a.wrapping_add(b as u32)) % 360) as f32;
             let (r, g, b) = hsv_to_rgb(hue, 0.55, 0.45);
-            let (w_avail, _) = (ui.available_width(), ui.available_height());
-            let thumb_h = w_avail.min(110.0);
-            let (rect, _) = ui.allocate_exact_size(Vec2::new(w_avail, thumb_h), egui::Sense::hover());
+            // Fixed-size thumbnail (not available_width, which expands the card
+            // to the full window and pushes later cards onto a wrapped line).
+            let thumb_w = (w - 20.0).max(1.0);
+            let thumb_h = 110.0;
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(thumb_w, thumb_h), egui::Sense::hover());
             ui.painter().rect_filled(rect, 8.0, Color32::from_rgb(r, g, b));
             ui.painter().text(
                 rect.center(),
