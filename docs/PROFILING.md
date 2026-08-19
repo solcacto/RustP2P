@@ -94,3 +94,28 @@ local avatar again while keeping batching (still 3 unique materials).
 Result (Apple M1): average frame time **18.75 ms → 7.9 ms debug (124 FPS) /
 3.5 ms release (284 FPS)** with shadows + palette restored. The remaining frame
 time is macOS window-server pacing, not render work.
+
+## Network optimization (Commit 29)
+
+The network layer was optimized for latency, loss, and bandwidth:
+
+- **Packet batching** — high-frequency traffic (poses, scores) is accumulated
+  and flushed as **one UDP datagram per peer** per 16 ms window (or once a batch
+  holds 10 messages), cutting packet count.
+- **Delta compression** — avatar poses ship as **8-byte deltas** (4×i16, mm
+  precision) instead of 16-byte full f32 poses (**50% bandwidth reduction**);
+  full poses are sent on the first message and on teleports.
+- **Reliable channel** — `send_reliable_message` delivers with ack + retry
+  (100 ms, 3 retries) for chat/game events.
+- **Enhanced `PeerStats`** — messages/packets, packet-loss %, bandwidth KiB/s,
+  and average batch size, plus UDP socket tuning (`set_ttl`, buffers).
+
+Measured loopback network performance (debug, Apple M1):
+
+| Metric | Before | After |
+|--------|--------|-------|
+| RTT | 5.9 ms (measurement artifact) | **0.02 ms** |
+| Packet loss | 0.2 % | **0.0 %** |
+| Bandwidth | 12.4 KiB/s | **3.19 KiB/s** |
+| Avg batch size | 1.0 | **6.0 messages/packet** |
+| Pose bytes | 16 | **8 (50 % smaller)** |

@@ -131,6 +131,17 @@ impl Context {
         bridge::send_network_message(peer_id.as_bytes(), message)
     }
 
+    /// Sends a **reliable** message to `peer_id` (acked + retried by the host).
+    pub fn send_reliable_message(&self, peer_id: &str, message: &[u8]) -> bool {
+        bridge::send_reliable_message(peer_id.as_bytes(), message)
+    }
+
+    /// Receives the next reliably-delivered message into `buffer`, returning
+    /// its length.
+    pub fn receive_reliable_message(&self, buffer: &mut [u8]) -> Option<usize> {
+        bridge::receive_reliable_message(buffer)
+    }
+
     /// Receives the next inbound datagram into `buffer`, returning its length.
     pub fn receive_message(&self, buffer: &mut [u8]) -> Option<usize> {
         bridge::receive_network_message(buffer)

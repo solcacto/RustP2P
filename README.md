@@ -262,12 +262,15 @@ cargo run -p host --bin perf_report -- --frames 1000
 cargo bench -p host
 ```
 
-Host functions log a warning when a call exceeds 1 ms, and the P2P layer
-measures round-trip time continuously (`PeerStats`). Baseline (Apple M1,
-debug build): `wasm_game_tick` ≈ 313 ns, `wasm_instantiation` ≈ 492 µs.
-Rendering was optimized in Commit 27 (shared batched avatar mesh + materials,
-continuous updates, vsync off): average frame time dropped from **18.75 ms →
-7.9 ms (126 FPS)**, with only 2 unique materials and ~4 visible entities.
+Host functions log a warning when a call exceeds 1 ms. The P2P layer batches
+packets (≤16 ms), delta-compresses avatar poses (16→8 bytes), and measures RTT
+continuously; `perf_report` shows loopback RTT **0.02 ms**, **0.0%** packet
+loss, **3.2 KiB/s** bandwidth, and **6 messages/packet** avg batch. Baseline
+(Apple M1, debug build): `wasm_game_tick` ≈ 313 ns, `wasm_instantiation` ≈
+492 µs. Rendering was optimized in Commit 27 (shared batched avatar mesh +
+materials, continuous updates, vsync off): average frame time dropped from
+**18.75 ms → 7.9 ms (126 FPS)**, with only 2 unique materials and ~4 visible
+entities.
 
 ## Run the game
 

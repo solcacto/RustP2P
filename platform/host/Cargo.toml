@@ -51,3 +51,7 @@ harness = false
 [[bench]]
 name = "network_latency"
 harness = false
+
+[[bench]]
+name = "network_optimization"
+harness = false

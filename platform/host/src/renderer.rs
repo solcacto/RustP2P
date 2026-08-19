@@ -304,6 +304,12 @@ fn wasm_render_tick(runtime: Res<WasmRuntime>, stats: Res<SharedFrameStats>) {
         store.data_mut().update_frame();
         let net_start = std::time::Instant::now();
         poll_network(store);
+        // Flush batched messages (≤16ms window) and retry unacked reliable
+        // messages once per frame.
+        if let Some(pc) = store.data().peer_connection() {
+            pc.flush_batches();
+            pc.process_reliable_retries();
+        }
         stats.0.lock().unwrap().add_network(net_start.elapsed().as_secs_f64() * 1000.0);
     }
     let trapped = {
@@ -622,19 +628,15 @@ pub fn poll_network(store: &mut wasmtime::Store<HostState>) {
     let mut scores = remote_scores.lock().unwrap();
     let chunk_registry = store.data().chunk_registry().clone();
     let mut chunks = chunk_registry.lock().unwrap();
-    let now = Instant::now();
     for (addr, payload) in incoming {
         match payload.len() {
-            16 => {
+            16 | 8 => {
                 let Some(peer_id) = peer_id_for(store, addr) else { continue };
-                let x = f32::from_le_bytes(payload[0..4].try_into().unwrap());
-                let y = f32::from_le_bytes(payload[4..8].try_into().unwrap());
-                let z = f32::from_le_bytes(payload[8..12].try_into().unwrap());
-                let rot_y = f32::from_le_bytes(payload[12..16].try_into().unwrap());
-                if !(x.is_finite() && y.is_finite() && z.is_finite() && rot_y.is_finite()) {
-                    continue;
-                }
-                map.insert(peer_id, AvatarPose { x, y, z, rot_y, last_seen: now });
+                // 8-byte payloads are delta-compressed poses; reconstruct using
+                // the previous known pose for this peer.
+                let pose = crate::net::decode_pose(map.get(&peer_id), &payload);
+                let Some(pose) = pose else { continue };
+                map.insert(peer_id, pose);
             }
             4 => {
                 let Some(peer_id) = peer_id_for(store, addr) else { continue };

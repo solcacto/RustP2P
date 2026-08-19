@@ -103,6 +103,8 @@ pub struct HostState {
     owner_pubkey: String,
     /// IPFS node API used for publishing/fetching chunk state.
     ipfs_api: String,
+    /// Last pose sent by the guest, for delta compression of broadcasts.
+    last_sent_pose: Option<AvatarState>,
     /// The zone (chunk + its owner) the local player currently occupies.
     current_zone: Option<ZoneInfo>,
     /// The applied content of the current zone ("state stream").
@@ -155,6 +157,7 @@ impl HostState {
             chunk_states: HashMap::new(),
             owner_pubkey: String::new(),
             ipfs_api: crate::ipfs::IPFS_API.to_string(),
+            last_sent_pose: None,
             current_zone: None,
             zone_content: None,
         }
@@ -424,6 +427,16 @@ impl HostState {
     /// The IPFS node API this host uses.
     pub fn ipfs_api(&self) -> &str {
         &self.ipfs_api
+    }
+
+    /// The last pose broadcast by the guest (for delta compression).
+    pub fn last_sent_pose(&self) -> Option<&AvatarState> {
+        self.last_sent_pose.as_ref()
+    }
+
+    /// Sets the last pose broadcast by the guest.
+    pub fn set_last_sent_pose(&mut self, pose: AvatarState) {
+        self.last_sent_pose = Some(pose);
     }
 
     /// Records a chunk modification: the owning peer saves it locally (JSON)

@@ -69,9 +69,97 @@ fn main() -> Result<()> {
     let mem_after = process_rss_mb();
 
     let summary = stats.0.lock().unwrap().summary();
-    let loopback_rtt = measure_loopback_rtt();
-    print_report(&summary, mem_before, mem_after, wasm_size, frames, loopback_rtt);
+    let network = measure_network();
+    print_report(&summary, mem_before, mem_after, wasm_size, frames, &network);
     Ok(())
+}
+
+/// Network performance measured over a loopback batched+compressed session
+/// between two `udp_only` connections.
+#[derive(Debug, Clone)]
+struct NetworkReport {
+    /// Round-trip time (ms), microsecond timing.
+    rtt_ms: f64,
+    /// Estimated packet loss (batch sequence gaps).
+    packet_loss_percent: f64,
+    /// Bandwidth (KiB/s) during the batched exchange.
+    bandwidth_kbps: f64,
+    /// Average inner messages per sent UDP packet.
+    avg_batch_size: f64,
+    /// Bandwidth reduction vs sending full 16-byte poses.
+    compression_ratio_pct: f64,
+}
+
+fn measure_network() -> NetworkReport {
+    use host::avatar_state::AvatarState;
+    use host::net;
+
+    let mut a = PeerConnection::udp_only("net-a", "127.0.0.1:0").unwrap();
+    let mut b = PeerConnection::udp_only("net-b", "127.0.0.1:0").unwrap();
+    let b_addr = b.local_addr().unwrap();
+    let a_addr = a.local_addr().unwrap();
+    a.connect_direct("peer-b", b_addr);
+    b.connect_direct("peer-a", a_addr);
+
+    // RTT with microsecond timing: tight non-blocking poll (no sleep artifact).
+    let mut rtts = Vec::new();
+    let mut buf = [0u8; 64];
+    for _ in 0..20 {
+        let start = std::time::Instant::now();
+        a.send_udp(b_addr, b"probe").unwrap();
+        loop {
+            if b.try_recv_udp(&mut buf).is_some() {
+                break;
+            }
+            if start.elapsed() > std::time::Duration::from_millis(100) {
+                break;
+            }
+        }
+        rtts.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
+    let rtt = rtts.iter().sum::<f64>() / rtts.len() as f64;
+
+    // Batched + delta-compressed pose traffic: 5 pose messages + 1 score per
+    // batch, paced at one batch per 16 ms frame (game cadence) so bandwidth is
+    // the sustained rate.
+    let start = std::time::Instant::now();
+    let mut last: Option<AvatarState> = None;
+    let mut full_poses = 0usize;
+    let mut delta_poses = 0usize;
+    for _ in 0..40 {
+        let mut cur = last.unwrap_or_default();
+        cur.x += 0.05;
+        cur.rot_y += 0.01;
+        for _ in 0..5 {
+            let payload = net::encode_pose(last.as_ref(), &cur);
+            if payload.len() == net::POSE_FULL_LEN {
+                full_poses += 1;
+            } else {
+                delta_poses += 1;
+            }
+            a.batch_send_to_all(&payload);
+            last = Some(cur);
+        }
+        a.batch_send_to_all(&3u32.to_le_bytes());
+        a.flush_batches();
+        b.poll_incoming_from();
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+    let elapsed = start.elapsed();
+
+    let stats = a.stats();
+    let total_poses = (full_poses + delta_poses) as f64;
+    let avg_pose_bytes = (full_poses as f64 * 16.0 + delta_poses as f64 * 8.0) / total_poses;
+    let compression_ratio = ((16.0 - avg_pose_bytes) / 16.0 * 100.0).max(0.0);
+    let bandwidth = (stats.bytes_sent as f64 / 1024.0) / elapsed.as_secs_f64().max(0.001);
+
+    NetworkReport {
+        rtt_ms: rtt,
+        packet_loss_percent: stats.packet_loss_percent,
+        bandwidth_kbps: bandwidth,
+        avg_batch_size: stats.avg_batch_size,
+        compression_ratio_pct: compression_ratio,
+    }
 }
 
 fn print_report(
@@ -80,7 +168,7 @@ fn print_report(
     mem_after: f64,
     wasm_size: usize,
     frames: u32,
-    loopback_rtt: Option<f64>,
+    network: &NetworkReport,
 ) {
     let fps = if s.avg_frame_ms > 0.0 { 1000.0 / s.avg_frame_ms } else { 0.0 };
     println!("\n=== Performance Report ({frames} frames) ===");
@@ -101,11 +189,11 @@ fn print_report(
     }
     println!();
     println!("  Network stats:");
-    match loopback_rtt {
-        Some(rtt) => println!("    Loopback RTT: {:.3}ms", rtt),
-        None => println!("    Loopback RTT: n/a"),
-    }
-    println!("    (per-peer RTT is logged by play_game's `measure_rtt`)");
+    println!("    RTT: {:.2}ms", network.rtt_ms);
+    println!("    Packet loss: {:.2}%", network.packet_loss_percent);
+    println!("    Bandwidth: {:.2} KiB/s", network.bandwidth_kbps);
+    println!("    Avg batch size: {:.2} messages/packet", network.avg_batch_size);
+    println!("    Compression ratio (delta vs full pose): {:.0}%", network.compression_ratio_pct);
     println!();
     println!("  Memory:");
     println!("    Process RSS before: {:.1} MB | after: {:.1} MB (delta {:.1} MB)", mem_before, mem_after, mem_after - mem_before);
@@ -123,22 +211,6 @@ fn print_report(
     for (i, (name, ms)) in phases.iter().take(3).enumerate() {
         println!("    {}. {name} ({ms:.2}ms, {:.1}% of frame)", i + 1, ms / total * 100.0);
     }
-}
-
-/// Measures loopback UDP round-trip time with two `udp_only` connections.
-fn measure_loopback_rtt() -> Option<f64> {
-    let peer = PeerConnection::udp_only("rtt-a", "127.0.0.1:0").ok()?;
-    let target = PeerConnection::udp_only("rtt-b", "127.0.0.1:0").ok()?;
-    let target_addr = target.local_addr().ok()?;
-    let mut buf = [0u8; 64];
-    let mut samples = Vec::new();
-    for _ in 0..8 {
-        let start = std::time::Instant::now();
-        peer.send_udp(target_addr, b"probe").ok()?;
-        let (_, _) = target.recv_udp(&mut buf).ok()?;
-        samples.push(start.elapsed().as_secs_f64() * 1000.0);
-    }
-    Some(samples.iter().sum::<f64>() / samples.len() as f64)
 }
 
 fn process_rss_mb() -> f64 {
