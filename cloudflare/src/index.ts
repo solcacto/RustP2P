@@ -14,13 +14,14 @@
  *       {"type":"webrtc_answer","from_peer":B,"to_peer":A,"sdp":...}
  *       {"type":"ice_candidate","from_peer":A,"to_peer":B,"candidate":...}
  *
- * State is an in-memory Map<string, WebSocket[]> — it resets on every deploy,
- * which is fine for a beta. A production deployment would move this into a
- * Durable Object, but the client protocol is identical either way.
+ * All sockets are handled inside a single Durable Object (`SignalHub`), so
+ * every connection shares one registry no matter which isolate the runtime
+ * places it on. A module-level Map would not work here: Cloudflare may route
+ * the two game clients to different isolates, each with its own Map.
  */
 
 interface Env {
-  // No bindings needed for the MVP.
+  SIGNAL_HUB: DurableObjectNamespace;
 }
 
 /** Every open server-side socket, keyed by the registered peer id. */
@@ -54,8 +55,13 @@ function relayTo(toPeer: string, text: string, sender: WebSocket): void {
   }
 }
 
-export default {
-  async fetch(request: Request, _env: Env, _ctx: ExecutionContext): Promise<Response> {
+/**
+ * One global instance that owns every signaling WebSocket. The registry lives
+ * here (not at module scope) so that peers reachable across the internet are
+ * guaranteed to share the same Map.
+ */
+export class SignalHub {
+  async fetch(request: Request): Promise<Response> {
     const upgradeHeader = request.headers.get("Upgrade");
     if (upgradeHeader !== "websocket") {
       return new Response("Expected WebSocket", { status: 400 });
@@ -94,5 +100,15 @@ export default {
     });
 
     return new Response(null, { status: 101, webSocket: client });
+  }
+}
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    // Route every connection (WebSocket upgrades and anything else) through
+    // the single SignalHub instance so state is shared globally.
+    const id = env.SIGNAL_HUB.idFromName("signal-hub");
+    const stub = env.SIGNAL_HUB.get(id);
+    return stub.fetch(request);
   },
 };

@@ -27,6 +27,8 @@ pub const SIGNATURE_PREFIX: &str = "ed25519_sig:";
 pub enum GameMode {
     /// A bounded multiplayer session between `max_players` peers.
     Session,
+    /// A single-player game that needs no peers (network calls no-op).
+    Solo,
 }
 
 /// The avatar skeleton the game expects the host to provide.

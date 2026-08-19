@@ -1,6 +1,7 @@
 use anyhow::{anyhow, bail, Result};
 use host::host_functions;
 use host::host_state::HostState;
+use host::net_link::NetLink;
 use host::peer_connection::PeerConnection;
 use std::thread;
 use std::time::Duration;
@@ -18,15 +19,22 @@ fn setup_peer(peer_id: &str) -> Result<(Store<HostState>, Instance)> {
     let module = Module::new(&engine, wat)?;
     let instance = linker.instantiate(&mut store, &module)?;
 
-    store.data_mut().set_peer_connection(Some(PeerConnection::new(
-        peer_id,
-        SIGNAL_SERVER,
-        "127.0.0.1:0",
-    )?));
+    store
+        .data_mut()
+        .set_peer_connection(Some(NetLink::Udp(Box::new(PeerConnection::new(
+            peer_id,
+            SIGNAL_SERVER,
+            "127.0.0.1:0",
+        )?))));
     Ok((store, instance))
 }
 
-fn write_str(instance: &Instance, store: &mut Store<HostState>, offset: usize, s: &str) -> Result<()> {
+fn write_str(
+    instance: &Instance,
+    store: &mut Store<HostState>,
+    offset: usize,
+    s: &str,
+) -> Result<()> {
     let mem = instance
         .get_memory(&mut *store, "memory")
         .ok_or_else(|| anyhow!("no memory export"))?;
@@ -34,7 +42,12 @@ fn write_str(instance: &Instance, store: &mut Store<HostState>, offset: usize, s
     Ok(())
 }
 
-fn read_mem(instance: &Instance, store: &mut Store<HostState>, offset: usize, len: usize) -> Result<Vec<u8>> {
+fn read_mem(
+    instance: &Instance,
+    store: &mut Store<HostState>,
+    offset: usize,
+    len: usize,
+) -> Result<Vec<u8>> {
     let mem = instance
         .get_memory(&mut *store, "memory")
         .ok_or_else(|| anyhow!("no memory export"))?;
@@ -73,8 +86,8 @@ fn main() -> Result<()> {
     write_str(&instance_a, &mut store_a, 0, "host-b")?;
     write_str(&instance_a, &mut store_a, 100, "WasmPing")?;
     let sent_a = {
-        let f = instance_a
-            .get_typed_func::<(i32, i32, i32, i32), i32>(&mut store_a, "tick_network")?;
+        let f =
+            instance_a.get_typed_func::<(i32, i32, i32, i32), i32>(&mut store_a, "tick_network")?;
         f.call(&mut store_a, (0, 6, 100, 8))?
     };
     println!("Host A tick returned {sent_a} (expected 0, nothing to receive)");
@@ -87,8 +100,8 @@ fn main() -> Result<()> {
     write_str(&instance_b, &mut store_b, 0, "host-a")?;
     write_str(&instance_b, &mut store_b, 100, "WasmPong!")?;
     let received_b = {
-        let f = instance_b
-            .get_typed_func::<(i32, i32, i32, i32), i32>(&mut store_b, "tick_network")?;
+        let f =
+            instance_b.get_typed_func::<(i32, i32, i32, i32), i32>(&mut store_b, "tick_network")?;
         f.call(&mut store_b, (0, 6, 100, 9))?
     };
     println!("Host B received message of length {received_b}");
@@ -97,15 +110,18 @@ fn main() -> Result<()> {
     }
     let ping = read_mem(&instance_b, &mut store_b, 200, 8)?;
     if ping != b"WasmPing" {
-        bail!("Host B received wrong content: {:?}", String::from_utf8_lossy(&ping));
+        bail!(
+            "Host B received wrong content: {:?}",
+            String::from_utf8_lossy(&ping)
+        );
     }
     println!("Host B received: {}", String::from_utf8_lossy(&ping));
 
     // --- Host A receives "WasmPong!" ---
     poll_and_forward(&mut store_a);
     let received_a = {
-        let f = instance_a
-            .get_typed_func::<(i32, i32, i32, i32), i32>(&mut store_a, "tick_network")?;
+        let f =
+            instance_a.get_typed_func::<(i32, i32, i32, i32), i32>(&mut store_a, "tick_network")?;
         f.call(&mut store_a, (0, 6, 100, 8))?
     };
     println!("Host A received message of length {received_a}");
@@ -114,7 +130,10 @@ fn main() -> Result<()> {
     }
     let pong = read_mem(&instance_a, &mut store_a, 200, 9)?;
     if pong != b"WasmPong!" {
-        bail!("Host A received wrong content: {:?}", String::from_utf8_lossy(&pong));
+        bail!(
+            "Host A received wrong content: {:?}",
+            String::from_utf8_lossy(&pong)
+        );
     }
     println!("Host A received: {}", String::from_utf8_lossy(&pong));
 
@@ -126,8 +145,7 @@ fn main() -> Result<()> {
         .incoming_messages_mut()
         .push_back(b"secret".to_vec());
     let bad_result = {
-        let f = instance_a
-            .get_typed_func::<(i32, i32), i32>(&mut store_a, "receive_at")?;
+        let f = instance_a.get_typed_func::<(i32, i32), i32>(&mut store_a, "receive_at")?;
         f.call(&mut store_a, (999_999, 64))?
     };
     println!("Security test: receive at out-of-bounds pointer returned {bad_result}");
@@ -141,8 +159,7 @@ fn main() -> Result<()> {
         .incoming_messages_mut()
         .push_back(b"again".to_vec());
     let good_result = {
-        let f = instance_a
-            .get_typed_func::<(i32, i32), i32>(&mut store_a, "receive_at")?;
+        let f = instance_a.get_typed_func::<(i32, i32), i32>(&mut store_a, "receive_at")?;
         f.call(&mut store_a, (300, 64))?
     };
     if good_result != 5 {

@@ -1,0 +1,83 @@
+name: Build desktop launcher
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build binaries
+        run: cargo build --release -p launcher -p host --bin play_game
+
+      - name: Assemble macOS app bundle
+        shell: bash
+        run: |
+          set -euxo pipefail
+          APP="dist/RustP2P Launcher.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp target/release/launcher target/release/play_game "$APP/Contents/MacOS/"
+          cp -r platform/host/assets "$APP/Contents/MacOS/assets"
+          cp platform/host/config.toml "$APP/Contents/MacOS/config.toml"
+          mkdir -p "$APP/Contents/MacOS/games"
+          cat > "$APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>RustP2P Launcher</string>
+  <key>CFBundleDisplayName</key><string>RustP2P Launcher</string>
+  <key>CFBundleIdentifier</key><string>io.solcacto.p2p.launcher</string>
+  <key>CFBundleExecutable</key><string>launcher</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleVersion</key><string>0.1.0</string>
+  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+</dict>
+</plist>
+PLIST
+
+      - name: Create DMG
+        run: |
+          hdiutil create -volname "RustP2P Launcher" -srcfolder "dist" -ov -format UDZO RustP2P-Launcher.dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: launcher-macos
+          path: |
+            RustP2P-Launcher.dmg
+            dist/
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build binaries
+        run: cargo build --release -p launcher -p host --bin play_game
+
+      - name: Assemble dist folder
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p dist
+          cp target/release/launcher.exe target/release/play_game.exe dist/
+          cp -r platform/host/assets dist/assets
+          cp platform/host/config.toml dist/config.toml
+          mkdir -p dist/games
+
+      - name: Create zip
+        shell: bash
+        run: |
+          cd dist && zip -r ../RustP2P-Launcher-Windows.zip . && cd ..
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: launcher-windows
+          path: |
+            RustP2P-Launcher-Windows.zip
+            dist/

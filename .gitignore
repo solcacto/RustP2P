@@ -1,4 +1,8 @@
 /target
-games/
-platform/games/
+/games/
+platform/host/games/
+platform/games/test_shooter/
+platform/games/test_world/
 platform/host/chunks/
+/dist/
+platform/games/pickup_blocks/target/

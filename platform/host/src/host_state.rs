@@ -11,7 +11,7 @@ use crate::chunk::{
 };
 use crate::input_state::InputState;
 use crate::ipfs::IpfsClient;
-use crate::peer_connection::PeerConnection;
+use crate::net_link::NetLink;
 use anyhow::Result;
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
@@ -68,7 +68,7 @@ pub struct HostState {
     input_state: InputState,
     previous_input_state: InputState,
     peer_id: String,
-    peer_connection: Option<PeerConnection>,
+    net_link: Option<NetLink>,
     connected_peers: Vec<String>,
     incoming_messages: VecDeque<Vec<u8>>,
     avatar_state: Option<Arc<Mutex<AvatarState>>>,
@@ -138,7 +138,7 @@ impl HostState {
             delta_time: 0.0,
             input_state: InputState::default(),
             previous_input_state: InputState::default(),
-            peer_connection: None,
+            net_link: None,
             connected_peers: Vec::new(),
             incoming_messages: VecDeque::new(),
             avatar_state: None,
@@ -224,18 +224,18 @@ impl HostState {
     }
 
     /// Replaces the peer connection, or removes it when passed `None`.
-    pub fn set_peer_connection(&mut self, pc: Option<PeerConnection>) {
-        self.peer_connection = pc;
+    pub fn set_peer_connection(&mut self, pc: Option<NetLink>) {
+        self.net_link = pc;
     }
 
     /// Returns the live peer connection, if one has been established.
-    pub fn peer_connection(&self) -> Option<&PeerConnection> {
-        self.peer_connection.as_ref()
+    pub fn peer_connection(&self) -> Option<&NetLink> {
+        self.net_link.as_ref()
     }
 
     /// Returns the live peer connection mutably, if one has been established.
-    pub fn peer_connection_mut(&mut self) -> Option<&mut PeerConnection> {
-        self.peer_connection.as_mut()
+    pub fn peer_connection_mut(&mut self) -> Option<&mut NetLink> {
+        self.net_link.as_mut()
     }
 
     /// Returns the ids of peers this node has established links with.
@@ -395,7 +395,10 @@ impl HostState {
             Some(pc) => pc.local_addr()?,
             None => "127.0.0.1:0".parse().expect("valid placeholder address"),
         };
-        self.chunk_registry.lock().unwrap().apply_claim(&claim, address);
+        self.chunk_registry
+            .lock()
+            .unwrap()
+            .apply_claim(&claim, address);
         if let Some(pc) = self.peer_connection() {
             pc.send_to_all(&claim.wire_bytes())?;
         }
@@ -443,13 +446,16 @@ impl HostState {
     /// so it can be re-published later.
     pub fn record_chunk_edit(&mut self, edit: ChunkEdit) -> Result<()> {
         let coord = ChunkCoord::at(edit.x, edit.z);
-        let state = self.chunk_states.entry(coord).or_insert_with(|| ChunkState {
-            chunk: coord,
-            owner: self.peer_id.clone(),
-            owner_pubkey: self.owner_pubkey.clone(),
-            modified_at: crate::chunk::now_ms(),
-            edits: Vec::new(),
-        });
+        let state = self
+            .chunk_states
+            .entry(coord)
+            .or_insert_with(|| ChunkState {
+                chunk: coord,
+                owner: self.peer_id.clone(),
+                owner_pubkey: self.owner_pubkey.clone(),
+                modified_at: crate::chunk::now_ms(),
+                edits: Vec::new(),
+            });
         state.apply(edit);
         ChunkStore::new(&self.peer_id).save(state)
     }
@@ -516,9 +522,16 @@ impl HostState {
     /// Records a remote chunk-state pointer (received over the mesh) in the
     /// DHT and warms the local IPFS cache so the state survives the owner's
     /// departure.
-    pub fn ingest_state_pointer(&mut self, pointer: &ChunkStatePointer, addr: std::net::SocketAddr) {
+    pub fn ingest_state_pointer(
+        &mut self,
+        pointer: &ChunkStatePointer,
+        addr: std::net::SocketAddr,
+    ) {
         self.chunk_registry.lock().unwrap().record_state(
-            ChunkCoord { x: pointer.chunk_x, z: pointer.chunk_z },
+            ChunkCoord {
+                x: pointer.chunk_x,
+                z: pointer.chunk_z,
+            },
             pointer.state_cid.clone(),
             pointer.owner_pubkey.clone(),
             pointer.peer_id.clone(),
@@ -613,8 +626,15 @@ impl HostState {
 
     /// Handles an incoming zone-join request: the owner replies with its live
     /// chunk state.
-    pub fn handle_zone_join_request(&mut self, req: &ZoneJoinRequest, addr: SocketAddr) -> Result<()> {
-        let chunk = ChunkCoord { x: req.chunk_x, z: req.chunk_z };
+    pub fn handle_zone_join_request(
+        &mut self,
+        req: &ZoneJoinRequest,
+        addr: SocketAddr,
+    ) -> Result<()> {
+        let chunk = ChunkCoord {
+            x: req.chunk_x,
+            z: req.chunk_z,
+        };
         let state = self
             .chunk_states
             .get(&chunk)

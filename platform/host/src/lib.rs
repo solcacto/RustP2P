@@ -36,6 +36,7 @@ pub mod input_state;
 pub mod ipfs;
 pub mod manifest;
 pub mod net;
+pub mod net_link;
 pub mod peer_connection;
 pub mod profiling;
 pub mod renderer;

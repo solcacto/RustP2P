@@ -4,9 +4,13 @@
 #
 #   Usage:
 #     PINATA_JWT=<your-jwt> ./scripts/publish.sh [guest.wasm manifest.json]
+#     PINATA_JWT=<your-jwt> ./scripts/publish.sh <bundle-dir>
 #
 #   Without arguments the script looks for ./build/guest.wasm and
-#   ./build/manifest.json. With arguments, the two files are taken in order.
+#   ./build/manifest.json. With a single directory argument it looks for
+#   <dir>/guest.wasm and <dir>/game_manifest.json (the layout the host's
+#   bundle-preparation tooling produces). With two arguments, the files are
+#   taken in order.
 #
 #   The script bundles both files into a single .tar.gz (the exact format the
 #   host's IPFS `extract` understands), uploads it to Pinata, and prints the
@@ -43,9 +47,16 @@ if [ -z "${PINATA_JWT:-}" ]; then
     exit 1
 fi
 
-# --- 2. Locate the game files (explicit args or build/ dir). -----------------
-WASM="${1:-build/guest.wasm}"
-MANIFEST="${2:-build/manifest.json}"
+# --- 2. Locate the game files (explicit args, bundle dir, or build/). ---------
+# A single directory argument means <dir>/game_manifest.json plus the wasm file
+# that manifest's `wasm_entry` names (so any game, not just `guest.wasm`, works).
+if [ "$#" -eq 1 ] && [ -d "$1" ]; then
+    MANIFEST="$1/game_manifest.json"
+    WASM="$1/$(jq -r '.wasm_entry // "guest.wasm"' "$MANIFEST" 2>/dev/null || echo guest.wasm)"
+else
+    WASM="${1:-build/guest.wasm}"
+    MANIFEST="${2:-build/manifest.json}"
+fi
 
 if [ ! -f "$WASM" ]; then
     echo "Error: game wasm not found at '$WASM'" >&2

@@ -8,7 +8,7 @@
 
 [network]
 # TODO: Replace this placeholder with the actual URL printed after running `npx wrangler deploy`
-signaling_url = "wss://p2p-signal.workers.dev"
+signaling_url = "wss://p2p-signal.solcacto-p2p.workers.dev"
 
 stun_servers = ["stun:stun.l.google.com:19302"]
 
@@ -24,4 +24,4 @@ registry_url = "https://solcacto.github.io/my-platform-registry/games.json"
 # carries CIDs; the bundle bytes themselves live on the IPFS swarm and are
 # fetched from whichever gateway is reachable (cloudflare-ipfs.com mirrors the
 # public network, no account required).
-ipfs_gateway = "https://cloudflare-ipfs.com"
+ipfs_gateway = "https://gateway.pinata.cloud"

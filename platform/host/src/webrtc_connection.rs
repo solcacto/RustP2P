@@ -151,8 +151,8 @@ pub struct WebRtcConnection {
 
 impl WebRtcConnection {
     /// Connects to `remote_id` over WebRTC, using the signaling server at
-    /// `signal_addr` (e.g. `"127.0.0.1:9001"`) for SDP/ICE exchange and
-    /// Google's public STUN server for NAT discovery.
+    /// `signal_addr` (e.g. `"127.0.0.1:9001"` or a `wss://` worker URL) for
+    /// SDP/ICE exchange and Google's public STUN server for NAT discovery.
     ///
     /// Blocks until the data channel opens or `timeout` elapses. The peer with
     /// the lexicographically smaller id is the offerer, so both sides agree on
@@ -450,6 +450,18 @@ fn default_ice_servers() -> Vec<RTCIceServer> {
     }]
 }
 
+/// Builds a WebSocket URL from a signal address, accepting either a plain
+/// `host:port` (assumed `ws://`) or a fully-qualified `ws://` / `wss://` URL
+/// (as used by the deployed Cloudflare Worker).
+pub fn signal_ws_url(signal_addr: &str) -> String {
+    let trimmed = signal_addr.trim_end_matches('/');
+    if trimmed.starts_with("ws://") || trimmed.starts_with("wss://") {
+        format!("{trimmed}/")
+    } else {
+        format!("ws://{trimmed}/")
+    }
+}
+
 /// Everything the background runtime needs to drive one WebRTC session.
 struct SessionParams {
     local_id: String,
@@ -496,7 +508,7 @@ async fn webrtc_main(
     let ice_servers = &params.ice_servers;
     let timeout = params.timeout;
     // --- Signaling WebSocket (SDP offers/answers + ICE candidates). ---
-    let url = format!("ws://{signal_addr}/");
+    let url = signal_ws_url(signal_addr);
     let (ws, _) = tokio_tungstenite::connect_async(&url)
         .await
         .with_context(|| format!("signaling server at {signal_addr} not reachable"))?;

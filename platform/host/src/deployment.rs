@@ -113,7 +113,10 @@ mod tests {
     fn parses_the_shipped_config_toml() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.toml");
         let cfg = DeploymentConfig::load(&path).expect("config.toml must parse");
-        assert_eq!(cfg.network.signaling_url, "wss://p2p-signal.workers.dev");
+        assert_eq!(
+            cfg.network.signaling_url,
+            "wss://p2p-signal.solcacto-p2p.workers.dev"
+        );
         assert_eq!(
             cfg.network.registry_url,
             "https://solcacto.github.io/my-platform-registry/games.json"

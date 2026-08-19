@@ -1,23 +1,71 @@
 use anyhow::{bail, Context, Result};
 use host::{
-    avatar_state::{AvatarPose, AvatarState},
     avatar_standard,
+    avatar_state::{AvatarPose, AvatarState},
     cosmetic,
+    deployment::{DeploymentConfig, NetworkConfig},
     host_functions,
     host_state::HostState,
     manifest::GameManifest,
-    peer_connection::PeerConnection,
+    net_link::NetLink,
     renderer,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use wasmtime::{Engine, Linker, Module, Store};
+use webrtc::ice_transport::ice_server::RTCIceServer;
 
-const SIGNAL_SERVER: &str = "127.0.0.1:9001";
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_SIGNAL_SERVER: &str = "127.0.0.1:9001";
+const CONFIG_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/config.toml");
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
 const GAME_PACKAGE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../guest");
 const AVATAR_ASSET_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets");
+
+/// The directory containing this executable. Shipped bundles carry the game
+/// binaries, `config.toml`, `assets/`, and the `games/` cache next to the
+/// executable, so runtime resolution lets a standalone build work on any
+/// machine instead of relying on compile-time workspace paths.
+fn exe_dir() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+/// The avatar/cosmetic asset directory: prefer the sibling `assets/` folder of
+/// this executable, falling back to the compile-time workspace path (used when
+/// run from `cargo run`).
+fn asset_dir() -> std::path::PathBuf {
+    let sibling = exe_dir().join("assets");
+    if sibling.join("avatar_standard.glb").exists() {
+        sibling
+    } else {
+        std::path::PathBuf::from(AVATAR_ASSET_DIR)
+    }
+}
+
+/// The downloaded-game cache: prefer the sibling `games/` folder of this
+/// executable, falling back to the compile-time workspace path.
+fn games_dir() -> std::path::PathBuf {
+    let sibling = exe_dir().join("games");
+    if sibling.exists() || std::fs::create_dir_all(&sibling).is_ok() {
+        sibling
+    } else {
+        std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/games"))
+    }
+}
+
+/// The deployment config: a sibling `config.toml` overrides the baked-in
+/// workspace path (which is itself preferred over the local-signal default).
+fn config_path() -> std::path::PathBuf {
+    let sibling = exe_dir().join("config.toml");
+    if sibling.exists() {
+        sibling
+    } else {
+        std::path::PathBuf::from(CONFIG_PATH)
+    }
+}
 
 /// Commit 17: loads a game *package* — a `game_manifest.json` plus its Wasm —
 /// validates the manifest, refuses to load if the pinned SHA-256 doesn't match,
@@ -32,13 +80,14 @@ fn main() -> Result<()> {
         .map(|i| args[i + 1].clone())
         .unwrap_or_else(|| "A".to_string());
     if role != "A" && role != "B" {
-        bail!("usage: play_game --role A|B [--cid <CID> | --package <dir>] [--ipfs <api>] [--avatar <path>] [--cosmetic <manifest>] [--auto] [--frames N] [--no-exit]");
+        bail!("usage: play_game --role A|B [--cid <CID> | --package <dir>] [--ipfs <api>] [--avatar <path>] [--cosmetic <manifest>] [--auto] [--frames N] [--no-exit] [--solo]");
     }
     let local_id = format!("Peer{role}");
     let remote_id = if role == "A" { "PeerB" } else { "PeerA" };
     let axis: u8 = if role == "A" { 0 } else { 1 };
     let auto = args.iter().any(|a| a == "--auto");
     let no_exit = args.iter().any(|a| a == "--no-exit");
+    let solo = args.iter().any(|a| a == "--solo");
     let frames = args
         .iter()
         .position(|a| a == "--frames")
@@ -135,7 +184,7 @@ fn main() -> Result<()> {
     // The avatar is loaded from a configurable path before the game starts and
     // validated against the avatar standard; a non-conforming avatar refuses to
     // load.
-    let avatar_file = std::path::Path::new(AVATAR_ASSET_DIR).join(&avatar_path);
+    let avatar_file = asset_dir().join(&avatar_path);
     let avatar_report = avatar_standard::validate_avatar_path(&avatar_file)?;
     println!(
         "[{role}] avatar '{avatar_path}': {} bones, {} triangles, {} textures, {} animations",
@@ -146,7 +195,7 @@ fn main() -> Result<()> {
     );
     let mut cosmetics: Vec<(renderer::AttachmentPoint, renderer::CosmeticSlot)> = Vec::new();
     for manifest_rel in &cosmetic_args {
-        match cosmetic::verify_package(AVATAR_ASSET_DIR, manifest_rel) {
+        match cosmetic::verify_package(asset_dir(), manifest_rel) {
             Ok(pkg) => {
                 let Some(point) = renderer::AttachmentPoint::parse(&pkg.manifest.attachment_point)
                 else {
@@ -179,18 +228,36 @@ fn main() -> Result<()> {
         .iter()
         .map(|(p, s)| format!("{}:{}", p.as_str(), s.item_id))
         .collect();
-    println!("[{role}] cosmetics: {}", if cosmetic_desc.is_empty() { "none".to_string() } else { cosmetic_desc.join(", ") });
+    println!(
+        "[{role}] cosmetics: {}",
+        if cosmetic_desc.is_empty() {
+            "none".to_string()
+        } else {
+            cosmetic_desc.join(", ")
+        }
+    );
 
     let engine = Engine::default();
     let mut linker = Linker::new(&engine);
     host_functions::register(&mut linker)?;
     let module = Module::new(&engine, wasm_bytes)?;
     let mut store = Store::new(&engine, HostState::new(local_id.clone()));
-    store.data_mut().set_avatar_state(Some(avatar_state.clone()));
+    store
+        .data_mut()
+        .set_avatar_state(Some(avatar_state.clone()));
     store.data_mut().set_remote_avatars(remote_avatars.clone());
     store.data_mut().set_movement_axis(axis);
     store.data_mut().set_avatar_path(avatar_path.clone());
-    store.data_mut().set_peer_connection(Some(connect_with_retry(&local_id)?));
+    if solo {
+        // Solo mode: no network link at all. The guest's network calls no-op
+        // through the host (they return "no peer" gracefully), so a solo game
+        // can still use input, chunk edits, and the HUD.
+        println!("[{role}] solo mode — no network link (play as a single player)");
+    } else {
+        store
+            .data_mut()
+            .set_peer_connection(Some(connect_with_retry(&local_id)?));
+    }
     let instance = linker.instantiate(&mut store, &module)?;
     let game_tick = instance.get_typed_func::<(), ()>(&mut store, "game_tick")?;
     println!(
@@ -199,9 +266,11 @@ fn main() -> Result<()> {
     );
 
     // Block until the other instance is registered and a P2P link is up.
-    println!("[{role}] connecting to {remote_id} via signaling server...");
-    connect_to_peer(&mut store, remote_id)?;
-    println!("[{role}] connected to {remote_id}");
+    if !solo {
+        println!("[{role}] connecting to {remote_id} via signaling server...");
+        connect_to_peer(&mut store, remote_id)?;
+        println!("[{role}] connected to {remote_id}");
+    }
 
     // Chunk ownership: on joining, claim the spawn chunk plus the one to +X.
     // ("I am hosting chunks X,Y and X+1,Y.")
@@ -238,10 +307,8 @@ fn main() -> Result<()> {
         Err(e) => println!("[{role}] warning: chunk state publish failed: {e}"),
     }
     if let Some(pc) = guard.data_mut().peer_connection_mut() {
-        match pc.shutdown() {
-            Ok(_) => println!("[{role}] signaling connection closed cleanly"),
-            Err(e) => println!("[{role}] warning: signaling shutdown: {e}"),
-        }
+        pc.shutdown();
+        println!("[{role}] signaling connection closed cleanly");
     }
     drop(guard);
 
@@ -282,7 +349,7 @@ fn main() -> Result<()> {
         if local == 0 && guest_score == 0 {
             bail!("[{role}] tag score never incremented (proximity mechanic failed)");
         }
-        if seen == 0 && remote_pose_count == 0 {
+        if !solo && seen == 0 && remote_pose_count == 0 {
             bail!("[{role}] guest never observed the remote avatar");
         }
     }
@@ -295,10 +362,13 @@ fn main() -> Result<()> {
 /// pins it (so this node seeds the game for the swarm), and returns the
 /// extracted package directory.
 fn fetch_game_from_ipfs(ipfs: &host::ipfs::IpfsClient, cid: &str) -> Result<std::path::PathBuf> {
-    let games_dir = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/games"));
+    let games_dir = games_dir();
     let game_dir = games_dir.join(cid);
     if game_dir.join("game_manifest.json").exists() {
-        println!("[{cid}] already downloaded; using local copy at {}", game_dir.display());
+        println!(
+            "[{cid}] already downloaded; using local copy at {}",
+            game_dir.display()
+        );
         return Ok(game_dir);
     }
 
@@ -319,12 +389,34 @@ fn fetch_game_from_ipfs(ipfs: &host::ipfs::IpfsClient, cid: &str) -> Result<std:
     Ok(game_dir)
 }
 
-/// Creates a peer connection, retrying until the signaling server is reachable.
-fn connect_with_retry(local_id: &str) -> Result<PeerConnection> {
+/// Creates a network link (WebRTC through the deployed Worker, or UDP against
+/// a local signaling server), retrying until the signaling server is reachable.
+/// The transport is chosen by the `[network]` section of `config.toml`:
+/// a full `ws://`/`wss://` URL selects WebRTC, anything else falls back to the
+/// classic UDP path (defaulting to `127.0.0.1:9001` for local development).
+fn connect_with_retry(local_id: &str) -> Result<NetLink> {
+    let (signal, ice) = match DeploymentConfig::load(&config_path()) {
+        Ok(cfg) => {
+            println!(
+                "[net] config.toml: signaling {} ({} stun, {} turn)",
+                cfg.network.signaling_url,
+                cfg.network.stun_servers.len(),
+                cfg.network.turn_servers.len(),
+            );
+            (
+                cfg.network.signaling_url.clone(),
+                ice_servers_from_config(&cfg.network),
+            )
+        }
+        Err(e) => {
+            println!("[net] no config.toml ({e:#}); using local signaling server {DEFAULT_SIGNAL_SERVER}");
+            (DEFAULT_SIGNAL_SERVER.to_string(), Vec::new())
+        }
+    };
     let deadline = Instant::now() + CONNECT_TIMEOUT;
     loop {
-        match PeerConnection::new(local_id, SIGNAL_SERVER, "127.0.0.1:0") {
-            Ok(pc) => return Ok(pc),
+        match NetLink::new(local_id, &signal, "127.0.0.1:0", ice.clone()) {
+            Ok(link) => return Ok(link),
             Err(e) => {
                 if Instant::now() >= deadline {
                     return Err(e.context("signaling server did not come up in time"));
@@ -333,6 +425,32 @@ fn connect_with_retry(local_id: &str) -> Result<PeerConnection> {
             }
         }
     }
+}
+
+/// Converts the `[network]` config section into WebRTC ICE servers.
+fn ice_servers_from_config(net: &NetworkConfig) -> Vec<RTCIceServer> {
+    let mut servers: Vec<RTCIceServer> = net
+        .stun_servers
+        .iter()
+        .map(|url| RTCIceServer {
+            urls: vec![url.clone()],
+            ..Default::default()
+        })
+        .collect();
+    if !net.turn_servers.is_empty() {
+        servers.push(RTCIceServer {
+            urls: net.turn_servers.clone(),
+            username: net.turn_username.clone(),
+            credential: net.turn_password.clone(),
+        });
+    }
+    if servers.is_empty() {
+        servers.push(RTCIceServer {
+            urls: vec![host::webrtc_connection::DEFAULT_STUN_URL.to_string()],
+            ..Default::default()
+        });
+    }
+    servers
 }
 
 /// Connects to `remote_id`, retrying until the other instance registers.

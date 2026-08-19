@@ -3,6 +3,7 @@ use host::{
     avatar_state::{AvatarPose, AvatarState},
     host_functions,
     host_state::HostState,
+    net_link::NetLink,
     peer_connection::PeerConnection,
     renderer,
 };
@@ -44,10 +45,14 @@ fn main() -> Result<()> {
     let wat = include_str!("../test_modules/multiplayer_wasm_test.wat");
     let module = Module::new(&engine, wat)?;
     let mut store = Store::new(&engine, HostState::new(local_id.clone()));
-    store.data_mut().set_avatar_state(Some(avatar_state.clone()));
+    store
+        .data_mut()
+        .set_avatar_state(Some(avatar_state.clone()));
     store.data_mut().set_remote_avatars(remote_avatars.clone());
     store.data_mut().set_movement_axis(axis);
-    store.data_mut().set_peer_connection(Some(connect_with_retry(&local_id)?));
+    store
+        .data_mut()
+        .set_peer_connection(Some(connect_with_retry(&local_id)?));
     let instance = linker.instantiate(&mut store, &module)?;
     let multiplayer_tick = instance.get_typed_func::<(), ()>(&mut store, "multiplayer_tick")?;
 
@@ -73,7 +78,7 @@ fn main() -> Result<()> {
     // Graceful shutdown: close the signaling WebSocket before the process exits.
     let mut guard = store_handle.lock().unwrap();
     if let Some(pc) = guard.data_mut().peer_connection_mut() {
-        let _ = pc.shutdown();
+        pc.shutdown();
     }
     drop(guard);
 
@@ -104,10 +109,12 @@ fn main() -> Result<()> {
 }
 
 /// Creates a peer connection, retrying until the signaling server is reachable.
-fn connect_with_retry(local_id: &str) -> Result<PeerConnection> {
+fn connect_with_retry(local_id: &str) -> Result<NetLink> {
     let deadline = Instant::now() + CONNECT_TIMEOUT;
     loop {
-        match PeerConnection::new(local_id, SIGNAL_SERVER, "127.0.0.1:0") {
+        match PeerConnection::new(local_id, SIGNAL_SERVER, "127.0.0.1:0")
+            .map(|pc| NetLink::Udp(Box::new(pc)))
+        {
             Ok(pc) => return Ok(pc),
             Err(e) => {
                 if Instant::now() >= deadline {

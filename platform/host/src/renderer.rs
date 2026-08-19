@@ -19,19 +19,19 @@ use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::core_pipeline::CorePipelinePlugin;
 use bevy::diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin};
 use bevy::gltf::GltfAssetLabel;
-use bevy::input::keyboard::{KeyboardInput, KeyCode};
+use bevy::input::keyboard::{KeyCode, KeyboardInput};
 use bevy::input::ButtonState;
 use bevy::log::LogPlugin;
 use bevy::pbr::{
-    DirectionalLight, DirectionalLightBundle, DirectionalLightShadowMap, NotShadowCaster, PbrPlugin,
-    StandardMaterial,
+    DirectionalLight, DirectionalLightBundle, DirectionalLightShadowMap, NotShadowCaster,
+    PbrPlugin, StandardMaterial,
 };
 use bevy::prelude::*;
 use bevy::render::pipelined_rendering::PipelinedRenderingPlugin;
 use bevy::render::RenderPlugin;
 use bevy::scene::ScenePlugin;
 use bevy::sprite::SpritePlugin;
-use bevy::text::{Text, TextStyle, TextPlugin};
+use bevy::text::{Text, TextPlugin, TextStyle};
 use bevy::transform::TransformPlugin;
 use bevy::ui::{node_bundles::TextBundle, PositionType, Style, UiPlugin, Val};
 use bevy::window::{PresentMode, Window, WindowPlugin};
@@ -87,7 +87,10 @@ pub struct AvatarMaterialPalette {
 impl AvatarMaterialPalette {
     /// Resolves the material for an avatar path (falling back to the default).
     pub fn material(&self, path: &str) -> Handle<StandardMaterial> {
-        self.by_path.get(path).cloned().unwrap_or_else(|| self.default.clone())
+        self.by_path
+            .get(path)
+            .cloned()
+            .unwrap_or_else(|| self.default.clone())
     }
 }
 
@@ -310,7 +313,11 @@ fn wasm_render_tick(runtime: Res<WasmRuntime>, stats: Res<SharedFrameStats>) {
             pc.flush_batches();
             pc.process_reliable_retries();
         }
-        stats.0.lock().unwrap().add_network(net_start.elapsed().as_secs_f64() * 1000.0);
+        stats
+            .0
+            .lock()
+            .unwrap()
+            .add_network(net_start.elapsed().as_secs_f64() * 1000.0);
     }
     let trapped = {
         let store = &mut *guard;
@@ -320,7 +327,11 @@ fn wasm_render_tick(runtime: Res<WasmRuntime>, stats: Res<SharedFrameStats>) {
             let frame = store.data().frame_count();
             let wasm_start = std::time::Instant::now();
             let result = runtime.render_tick.call(store, ());
-            stats.0.lock().unwrap().add_wasm(wasm_start.elapsed().as_secs_f64() * 1000.0);
+            stats
+                .0
+                .lock()
+                .unwrap()
+                .add_wasm(wasm_start.elapsed().as_secs_f64() * 1000.0);
             match result {
                 Ok(()) => None,
                 Err(err) => Some((format!("{err:#}"), frame)),
@@ -373,7 +384,9 @@ fn monitor_signaling(runtime: Res<WasmRuntime>) {
             };
             if let Err(e) = probe {
                 let delay = backoff(BACKOFF_BASE_MS, BACKOFF_MAX_MS, 1);
-                store.data_mut().set_signaling_status(SignalingStatus::Reconnecting { attempt: 1 });
+                store
+                    .data_mut()
+                    .set_signaling_status(SignalingStatus::Reconnecting { attempt: 1 });
                 store.data_mut().set_signaling_next_retry(Some(now + delay));
                 eprintln!("signaling link lost: {e}; reconnect in {delay:?}");
             }
@@ -392,7 +405,9 @@ fn monitor_signaling(runtime: Res<WasmRuntime>) {
             };
             match result {
                 Ok(_) => {
-                    store.data_mut().set_signaling_status(SignalingStatus::Connected);
+                    store
+                        .data_mut()
+                        .set_signaling_status(SignalingStatus::Connected);
                     store.data_mut().set_signaling_next_retry(None);
                     eprintln!("signaling link reconnected");
                 }
@@ -403,7 +418,9 @@ fn monitor_signaling(runtime: Res<WasmRuntime>) {
                         .data_mut()
                         .set_signaling_status(SignalingStatus::Reconnecting { attempt: next });
                     store.data_mut().set_signaling_next_retry(Some(now + delay));
-                    eprintln!("signaling reconnect failed (attempt {next}): {e}; retry in {delay:?}");
+                    eprintln!(
+                        "signaling reconnect failed (attempt {next}): {e}; retry in {delay:?}"
+                    );
                 }
             }
         }
@@ -418,7 +435,9 @@ fn monitor_signaling(runtime: Res<WasmRuntime>) {
                     .reconnect()
             };
             if result.is_ok() {
-                store.data_mut().set_signaling_status(SignalingStatus::Connected);
+                store
+                    .data_mut()
+                    .set_signaling_status(SignalingStatus::Connected);
                 store.data_mut().set_signaling_next_retry(None);
             }
         }
@@ -466,16 +485,16 @@ fn read_keyboard(
     }
     let mut store = runtime.store.lock().unwrap();
     store.data_mut().set_input(input);
-    stats.0.lock().unwrap().add_input(start.elapsed().as_secs_f64() * 1000.0);
+    stats
+        .0
+        .lock()
+        .unwrap()
+        .add_input(start.elapsed().as_secs_f64() * 1000.0);
 }
 
 /// Periodically pings every known peer to measure round-trip time, and records
 /// the samples into the shared frame stats.
-fn measure_rtt(
-    runtime: Res<WasmRuntime>,
-    stats: Res<SharedFrameStats>,
-    frames: Res<FrameCount>,
-) {
+fn measure_rtt(runtime: Res<WasmRuntime>, stats: Res<SharedFrameStats>, frames: Res<FrameCount>) {
     const PING_EVERY_FRAMES: u64 = 60;
     if !(frames.0 as u64).is_multiple_of(PING_EVERY_FRAMES) {
         return;
@@ -483,7 +502,7 @@ fn measure_rtt(
     let store = runtime.store.lock().unwrap();
     if let Some(pc) = store.data().peer_connection() {
         pc.ping_all();
-        if let Some(avg) = pc.stats().avg_rtt_ms() {
+        if let Some(avg) = pc.avg_rtt_ms() {
             stats.0.lock().unwrap().record_rtt(avg);
         }
     }
@@ -523,7 +542,10 @@ fn debug_frustum_culling(
     let total = visibility.iter().len();
     let visible = visibility.iter().filter(|v| v.get()).count();
     let material_count = materials.iter().len();
-    let unique_materials: usize = materials.iter().collect::<std::collections::HashSet<_>>().len();
+    let unique_materials: usize = materials
+        .iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len();
     tracing::info!(
         visible,
         culled = total.saturating_sub(visible),
@@ -577,7 +599,11 @@ fn update_hud(runtime: Res<WasmRuntime>, mut query: Query<&mut Text, With<ScoreT
             zone.chunk.x,
             zone.chunk.z,
             zone.owner,
-            store.data().zone_content().map(|s| s.edits.len()).unwrap_or(0)
+            store
+                .data()
+                .zone_content()
+                .map(|s| s.edits.len())
+                .unwrap_or(0)
         ),
         None => "Zone: none".to_string(),
     };
@@ -631,7 +657,9 @@ pub fn poll_network(store: &mut wasmtime::Store<HostState>) {
     for (addr, payload) in incoming {
         match payload.len() {
             16 | 8 => {
-                let Some(peer_id) = peer_id_for(store, addr) else { continue };
+                let Some(peer_id) = peer_id_for(store, addr) else {
+                    continue;
+                };
                 // 8-byte payloads are delta-compressed poses; reconstruct using
                 // the previous known pose for this peer.
                 let pose = crate::net::decode_pose(map.get(&peer_id), &payload);
@@ -639,7 +667,9 @@ pub fn poll_network(store: &mut wasmtime::Store<HostState>) {
                 map.insert(peer_id, pose);
             }
             4 => {
-                let Some(peer_id) = peer_id_for(store, addr) else { continue };
+                let Some(peer_id) = peer_id_for(store, addr) else {
+                    continue;
+                };
                 let score = u32::from_le_bytes(payload[0..4].try_into().unwrap());
                 scores.insert(peer_id, score);
             }
@@ -750,7 +780,13 @@ fn sync_avatar_scene(
     palette: Res<AvatarMaterialPalette>,
     avatars: Query<(Entity, &AvatarSource), With<Avatar>>,
 ) {
-    let desired = runtime.store.lock().unwrap().data().avatar_path().to_string();
+    let desired = runtime
+        .store
+        .lock()
+        .unwrap()
+        .data()
+        .avatar_path()
+        .to_string();
     match avatars.iter().next() {
         Some((entity, source)) if source.0 == desired => {
             let _ = entity;
@@ -809,7 +845,8 @@ fn attach_cosmetics(
                 continue;
             }
             let offset = attachment_offset(*point);
-            let scene = asset_server.load(GltfAssetLabel::Scene(0).from_asset(slot.mesh_asset_path.clone()));
+            let scene = asset_server
+                .load(GltfAssetLabel::Scene(0).from_asset(slot.mesh_asset_path.clone()));
             commands.entity(root).with_children(|parent| {
                 parent.spawn((
                     SceneBundle {
@@ -857,7 +894,13 @@ fn sync_remote_avatars(
 ) {
     let now = Instant::now();
     let map = handle.0.lock().unwrap();
-    let avatar_path = runtime.store.lock().unwrap().data().avatar_path().to_string();
+    let avatar_path = runtime
+        .store
+        .lock()
+        .unwrap()
+        .data()
+        .avatar_path()
+        .to_string();
 
     let mut stale = Vec::new();
     for (entity, peer, _) in avatars.iter() {
@@ -917,8 +960,7 @@ fn setup_scene(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     commands.spawn(Camera3dBundle {
-        transform: Transform::from_xyz(0.0, 3.0, 7.0)
-            .looking_at(Vec3::new(0.0, 0.8, 0.0), Vec3::Y),
+        transform: Transform::from_xyz(0.0, 3.0, 7.0).looking_at(Vec3::new(0.0, 0.8, 0.0), Vec3::Y),
         tonemapping: Tonemapping::None,
         ..default()
     });
@@ -1038,7 +1080,10 @@ fn build_avatar_mesh() -> Mesh {
     }
     let indices: Vec<u32> = (0..positions.len() as u32).collect();
 
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_indices(Indices::U32(indices));
@@ -1050,20 +1095,79 @@ fn box_geometry(center: [f32; 3], size: [f32; 3]) -> (Vec<[f32; 3]>, Vec<[f32; 3
     let [cx, cy, cz] = center;
     let (hw, hh, hd) = (size[0] / 2.0, size[1] / 2.0, size[2] / 2.0);
     let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
-        ([1.0, 0.0, 0.0], [[cx + hw, cy - hh, cz - hd], [cx + hw, cy - hh, cz + hd], [cx + hw, cy + hh, cz + hd], [cx + hw, cy + hh, cz - hd]]),
-        ([-1.0, 0.0, 0.0], [[cx - hw, cy - hh, cz + hd], [cx - hw, cy - hh, cz - hd], [cx - hw, cy + hh, cz - hd], [cx - hw, cy + hh, cz + hd]]),
-        ([0.0, 1.0, 0.0], [[cx - hw, cy + hh, cz - hd], [cx - hw, cy + hh, cz + hd], [cx + hw, cy + hh, cz + hd], [cx + hw, cy + hh, cz - hd]]),
-        ([0.0, -1.0, 0.0], [[cx - hw, cy - hh, cz + hd], [cx - hw, cy - hh, cz - hd], [cx + hw, cy - hh, cz - hd], [cx + hw, cy - hh, cz + hd]]),
-        ([0.0, 0.0, 1.0], [[cx - hw, cy - hh, cz + hd], [cx + hw, cy - hh, cz + hd], [cx + hw, cy + hh, cz + hd], [cx - hw, cy + hh, cz + hd]]),
-        ([0.0, 0.0, -1.0], [[cx + hw, cy - hh, cz - hd], [cx - hw, cy - hh, cz - hd], [cx - hw, cy + hh, cz - hd], [cx + hw, cy + hh, cz - hd]]),
+        (
+            [1.0, 0.0, 0.0],
+            [
+                [cx + hw, cy - hh, cz - hd],
+                [cx + hw, cy - hh, cz + hd],
+                [cx + hw, cy + hh, cz + hd],
+                [cx + hw, cy + hh, cz - hd],
+            ],
+        ),
+        (
+            [-1.0, 0.0, 0.0],
+            [
+                [cx - hw, cy - hh, cz + hd],
+                [cx - hw, cy - hh, cz - hd],
+                [cx - hw, cy + hh, cz - hd],
+                [cx - hw, cy + hh, cz + hd],
+            ],
+        ),
+        (
+            [0.0, 1.0, 0.0],
+            [
+                [cx - hw, cy + hh, cz - hd],
+                [cx - hw, cy + hh, cz + hd],
+                [cx + hw, cy + hh, cz + hd],
+                [cx + hw, cy + hh, cz - hd],
+            ],
+        ),
+        (
+            [0.0, -1.0, 0.0],
+            [
+                [cx - hw, cy - hh, cz + hd],
+                [cx - hw, cy - hh, cz - hd],
+                [cx + hw, cy - hh, cz - hd],
+                [cx + hw, cy - hh, cz + hd],
+            ],
+        ),
+        (
+            [0.0, 0.0, 1.0],
+            [
+                [cx - hw, cy - hh, cz + hd],
+                [cx + hw, cy - hh, cz + hd],
+                [cx + hw, cy + hh, cz + hd],
+                [cx - hw, cy + hh, cz + hd],
+            ],
+        ),
+        (
+            [0.0, 0.0, -1.0],
+            [
+                [cx + hw, cy - hh, cz - hd],
+                [cx - hw, cy - hh, cz - hd],
+                [cx - hw, cy + hh, cz - hd],
+                [cx + hw, cy + hh, cz - hd],
+            ],
+        ),
     ];
     let mut positions = Vec::new();
     let mut normals = Vec::new();
     for (n, corners) in faces {
-        let mut tris = [[corners[0], corners[1], corners[2]], [corners[0], corners[2], corners[3]]];
+        let mut tris = [
+            [corners[0], corners[1], corners[2]],
+            [corners[0], corners[2], corners[3]],
+        ];
         for tri in &mut tris {
-            let u = [tri[1][0] - tri[0][0], tri[1][1] - tri[0][1], tri[1][2] - tri[0][2]];
-            let v = [tri[2][0] - tri[0][0], tri[2][1] - tri[0][1], tri[2][2] - tri[0][2]];
+            let u = [
+                tri[1][0] - tri[0][0],
+                tri[1][1] - tri[0][1],
+                tri[1][2] - tri[0][2],
+            ];
+            let v = [
+                tri[2][0] - tri[0][0],
+                tri[2][1] - tri[0][1],
+                tri[2][2] - tri[0][2],
+            ];
             let cross = [
                 u[1] * v[2] - u[2] * v[1],
                 u[2] * v[0] - u[0] * v[2],

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "platform/platform-cli",
     "platform/host",
+    "platform/launcher",
     "platform/guest",
     "platform/guest-sdk",
     "platform/guest-sdk-macros",

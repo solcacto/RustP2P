@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use host::host_state::HostState;
+use host::net_link::NetLink;
 use host::peer_connection::PeerConnection;
 use std::net::SocketAddr;
 use std::sync::mpsc;
@@ -12,11 +13,13 @@ const SIGNAL_SERVER: &str = "127.0.0.1:9001";
 fn peer_a() -> Result<()> {
     let engine = Engine::default();
     let mut store = Store::new(&engine, HostState::new("peer-a"));
-    store.data_mut().set_peer_connection(Some(PeerConnection::new(
-        "A",
-        SIGNAL_SERVER,
-        "127.0.0.1:0",
-    )?));
+    store
+        .data_mut()
+        .set_peer_connection(Some(NetLink::Udp(Box::new(PeerConnection::new(
+            "A",
+            SIGNAL_SERVER,
+            "127.0.0.1:0",
+        )?))));
     println!(
         "Peer A registered (UDP {})",
         store.data().peer_connection().unwrap().local_addr()?
@@ -51,11 +54,13 @@ fn peer_a() -> Result<()> {
 fn peer_b() -> Result<()> {
     let engine = Engine::default();
     let mut store = Store::new(&engine, HostState::new("peer-b"));
-    store.data_mut().set_peer_connection(Some(PeerConnection::new(
-        "B",
-        SIGNAL_SERVER,
-        "127.0.0.1:0",
-    )?));
+    store
+        .data_mut()
+        .set_peer_connection(Some(NetLink::Udp(Box::new(PeerConnection::new(
+            "B",
+            SIGNAL_SERVER,
+            "127.0.0.1:0",
+        )?))));
     println!(
         "Peer B registered (UDP {})",
         store.data().peer_connection().unwrap().local_addr()?
