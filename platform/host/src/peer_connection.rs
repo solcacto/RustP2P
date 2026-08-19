@@ -5,13 +5,14 @@
 //! UDP — the signaling server is only used for discovery, not for relaying
 //! game traffic.
 
-use anyhow::{anyhow, bail, Context, Result};
 use crate::net::{self, ReliableMessage};
+use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::sync::Mutex;
+use std::thread;
 use std::time::{Duration, Instant};
 use tungstenite::{client as ws_client, Message, WebSocket};
 
@@ -247,14 +248,29 @@ impl PeerConnection {
 
     /// Asks the signaling server to connect us to `target` and waits for the
     /// target's address, which the server relays to us.
+    ///
+    /// The request is retried while the target is not yet registered — peers
+    /// come online at any moment, so a simultaneous join must not fail just
+    /// because the target registered a moment after us.
     pub fn request_connection(&mut self, target: &str) -> Result<SocketAddr> {
-        self.send_signal(&json!({
-            "type": "request_connection",
-            "from_peer": self.peer_id,
-            "to_peer": target,
-        }))?;
-        let addr = self.wait_for_connection_info(target, Duration::from_secs(5))?;
-        Ok(addr)
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            self.send_signal(&json!({
+                "type": "request_connection",
+                "from_peer": self.peer_id,
+                "to_peer": target,
+            }))?;
+            match self.wait_for_connection_info(
+                target,
+                deadline.saturating_duration_since(Instant::now()),
+            ) {
+                Ok(addr) => return Ok(addr),
+                Err(e) if e.to_string().contains("not found") && Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     /// Waits until the signaling server relays the address of `target`.

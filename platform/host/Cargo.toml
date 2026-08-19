@@ -6,6 +6,7 @@ default-run = "main"
 
 [dependencies]
 anyhow = "1"
+bytes = "1"
 bevy = { version = "0.14", default-features = false, features = [
     "bevy_winit",
     "bevy_render",
@@ -19,6 +20,7 @@ bevy = { version = "0.14", default-features = false, features = [
     "default_font",
 ] }
 ed25519-dalek = "2"
+futures-util = "0.3"
 gltf = "1.4"
 hex = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
@@ -30,12 +32,15 @@ registry_server = { path = "../registry_server" }
 signaling_server = { path = "../signaling_server" }
 sysinfo = "0.30"
 tar = "0.4"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-tracy = { version = "0.11", optional = true }
 tungstenite = "0.26"
+tokio-tungstenite = "0.26"
 ureq = "2"
 wasmtime = "35"
+webrtc = "0.17"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

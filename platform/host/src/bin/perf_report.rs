@@ -10,7 +10,10 @@ use host::{
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 use sysinfo::{Pid, System};
 
 const PACKAGE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../guest");
@@ -46,7 +49,9 @@ fn main() -> Result<()> {
     let wasm_size = wasm.len();
     let module = wasmtime::Module::new(&engine, wasm)?;
     let mut store = wasmtime::Store::new(&engine, HostState::new("perf"));
-    store.data_mut().set_avatar_state(Some(avatar_state.clone()));
+    store
+        .data_mut()
+        .set_avatar_state(Some(avatar_state.clone()));
     store.data_mut().set_remote_avatars(remote_avatars.clone());
     let instance = linker.instantiate(&mut store, &module)?;
     let tick = instance.get_typed_func::<(), ()>(&mut store, "game_tick")?;
@@ -70,7 +75,16 @@ fn main() -> Result<()> {
 
     let summary = stats.0.lock().unwrap().summary();
     let network = measure_network();
-    print_report(&summary, mem_before, mem_after, wasm_size, frames, &network);
+    let webrtc = measure_webrtc();
+    print_report(
+        &summary,
+        mem_before,
+        mem_after,
+        wasm_size,
+        frames,
+        &network,
+        webrtc.as_ref(),
+    );
     Ok(())
 }
 
@@ -162,6 +176,119 @@ fn measure_network() -> NetworkReport {
     }
 }
 
+/// WebRTC performance measured over a real SDP/ICE data-channel session between
+/// two peers, relayed by the signaling server at 127.0.0.1:9001.
+#[derive(Debug, Clone)]
+struct WebrtcReport {
+    /// Time from `connect` until the data channel opened (ms).
+    ice_connection_time_ms: f64,
+    /// Round-trip time over the data channel (ms).
+    rtt_ms: f64,
+    /// Sustained batched bandwidth (KiB/s).
+    bandwidth_kbps: f64,
+    /// Average inner messages per sent batched frame.
+    avg_batch_size: f64,
+}
+
+/// Connects two WebRTC peers through the signaling server and measures the
+/// data-channel. Returns `None` when the signaling server is unreachable so the
+/// report still works in environments without one.
+fn measure_webrtc() -> Option<WebrtcReport> {
+    use host::net;
+    use host::webrtc_connection::WebRtcConnection;
+
+    const SIGNAL: &str = "127.0.0.1:9001";
+    const TIMEOUT: Duration = Duration::from_secs(10);
+
+    // Peer B connects in a background thread and keeps polling so pings are
+    // echoed and inbound batches are drained while A runs the measurements.
+    let (b_tx, b_rx) = mpsc::channel();
+    let b = thread::spawn(move || {
+        let conn = match WebRtcConnection::connect("perf-b", "perf-a", SIGNAL, TIMEOUT) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = b_tx.send(Err(e.to_string()));
+                return;
+            }
+        };
+        let _ = b_tx.send(Ok(()));
+        let end = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < end {
+            conn.ping();
+            let _ = conn.poll_received();
+            thread::sleep(Duration::from_millis(5));
+        }
+        let _ = conn.close();
+    });
+
+    let a = match WebRtcConnection::connect("perf-a", "perf-b", SIGNAL, TIMEOUT) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = b.join();
+            println!("    WebRTC skipped: {e:#}");
+            return None;
+        }
+    };
+    match b_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            let _ = a.close();
+            let _ = b.join();
+            println!("    WebRTC skipped: {e}");
+            return None;
+        }
+        Err(_) => {
+            let _ = a.close();
+            let _ = b.join();
+            println!("    WebRTC skipped: peer B never connected");
+            return None;
+        }
+    }
+
+    let ice_connection_time_ms = a.stats().ice_connection_time_ms;
+
+    // RTT: ping + poll until a pong is measured.
+    let mut rtt_ms = 0.0;
+    let rtt_start = Instant::now();
+    while rtt_ms <= 0.0 && rtt_start.elapsed() < Duration::from_secs(5) {
+        a.ping();
+        let _ = a.poll_received();
+        rtt_ms = a.stats().rtt_ms;
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    // Batched + delta-compressed pose traffic: 5 poses + 1 score per frame,
+    // paced at the 16 ms game cadence for a sustained bandwidth figure.
+    let start = Instant::now();
+    let mut last: Option<AvatarState> = None;
+    for _ in 0..40 {
+        let mut cur = last.unwrap_or_default();
+        cur.x += 0.05;
+        cur.rot_y += 0.01;
+        for _ in 0..5 {
+            let payload = net::encode_pose(last.as_ref(), &cur);
+            a.batch_send(&payload);
+            last = Some(cur);
+        }
+        a.batch_send(&3u32.to_le_bytes());
+        a.flush_batches();
+        thread::sleep(Duration::from_millis(16));
+    }
+    let elapsed = start.elapsed();
+    let stats = a.stats();
+    let bandwidth_kbps = (stats.bytes_sent as f64 / 1024.0) / elapsed.as_secs_f64().max(0.001);
+
+    let _ = a.close();
+    let _ = b.join();
+
+    Some(WebrtcReport {
+        ice_connection_time_ms,
+        rtt_ms,
+        bandwidth_kbps,
+        avg_batch_size: stats.avg_batch_size,
+    })
+}
+
 fn print_report(
     s: &TimingSummary,
     mem_before: f64,
@@ -169,15 +296,28 @@ fn print_report(
     wasm_size: usize,
     frames: u32,
     network: &NetworkReport,
+    webrtc: Option<&WebrtcReport>,
 ) {
-    let fps = if s.avg_frame_ms > 0.0 { 1000.0 / s.avg_frame_ms } else { 0.0 };
+    let fps = if s.avg_frame_ms > 0.0 {
+        1000.0 / s.avg_frame_ms
+    } else {
+        0.0
+    };
     println!("\n=== Performance Report ({frames} frames) ===");
-    println!("  Average frame time: {:.2}ms ({:.1} FPS)", s.avg_frame_ms, fps);
-    println!("  Frame time percentiles: p50 {:.2}ms | p95 {:.2}ms | p99 {:.2}ms", s.p50_frame_ms, s.p95_frame_ms, s.p99_frame_ms);
+    println!(
+        "  Average frame time: {:.2}ms ({:.1} FPS)",
+        s.avg_frame_ms, fps
+    );
+    println!(
+        "  Frame time percentiles: p50 {:.2}ms | p95 {:.2}ms | p99 {:.2}ms",
+        s.p50_frame_ms, s.p95_frame_ms, s.p99_frame_ms
+    );
     println!();
     println!("  Breakdown (per frame):");
     let total = s.avg_frame_ms.max(0.001);
-    let other = (s.avg_frame_ms - s.avg_input_ms - s.avg_network_ms - s.avg_wasm_ms - s.avg_bevy_ms).max(0.0);
+    let other =
+        (s.avg_frame_ms - s.avg_input_ms - s.avg_network_ms - s.avg_wasm_ms - s.avg_bevy_ms)
+            .max(0.0);
     for (label, ms) in [
         ("Input polling", s.avg_input_ms),
         ("Network polling", s.avg_network_ms),
@@ -192,13 +332,43 @@ fn print_report(
     println!("    RTT: {:.2}ms", network.rtt_ms);
     println!("    Packet loss: {:.2}%", network.packet_loss_percent);
     println!("    Bandwidth: {:.2} KiB/s", network.bandwidth_kbps);
-    println!("    Avg batch size: {:.2} messages/packet", network.avg_batch_size);
-    println!("    Compression ratio (delta vs full pose): {:.0}%", network.compression_ratio_pct);
+    println!(
+        "    Avg batch size: {:.2} messages/packet",
+        network.avg_batch_size
+    );
+    println!(
+        "    Compression ratio (delta vs full pose): {:.0}%",
+        network.compression_ratio_pct
+    );
+    println!();
+    match webrtc {
+        Some(w) => {
+            println!("  WebRTC (data channel, NAT traversal):");
+            println!("    ICE connection time: {:.1}ms", w.ice_connection_time_ms);
+            println!("    RTT over data channel: {:.2}ms", w.rtt_ms);
+            println!("    Bandwidth: {:.2} KiB/s", w.bandwidth_kbps);
+            println!("    Avg batch size: {:.2} messages/frame", w.avg_batch_size);
+        }
+        None => println!(
+            "  WebRTC (data channel, NAT traversal): not measured (signaling server unavailable)"
+        ),
+    }
     println!();
     println!("  Memory:");
-    println!("    Process RSS before: {:.1} MB | after: {:.1} MB (delta {:.1} MB)", mem_before, mem_after, mem_after - mem_before);
-    println!("    Wasm module: {:.2} MB", wasm_size as f64 / 1024.0 / 1024.0);
-    println!("    Host assets dir: {:.2} MB", dir_size_mb(PathBuf::from(ASSETS_DIR)));
+    println!(
+        "    Process RSS before: {:.1} MB | after: {:.1} MB (delta {:.1} MB)",
+        mem_before,
+        mem_after,
+        mem_after - mem_before
+    );
+    println!(
+        "    Wasm module: {:.2} MB",
+        wasm_size as f64 / 1024.0 / 1024.0
+    );
+    println!(
+        "    Host assets dir: {:.2} MB",
+        dir_size_mb(PathBuf::from(ASSETS_DIR))
+    );
     println!();
     println!("  Bottlenecks:");
     let mut phases: Vec<(&str, f64)> = vec![
@@ -209,7 +379,11 @@ fn print_report(
     ];
     phases.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
     for (i, (name, ms)) in phases.iter().take(3).enumerate() {
-        println!("    {}. {name} ({ms:.2}ms, {:.1}% of frame)", i + 1, ms / total * 100.0);
+        println!(
+            "    {}. {name} ({ms:.2}ms, {:.1}% of frame)",
+            i + 1,
+            ms / total * 100.0
+        );
     }
 }
 
