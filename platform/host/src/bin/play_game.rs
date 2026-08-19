@@ -46,14 +46,33 @@ fn asset_dir() -> std::path::PathBuf {
 }
 
 /// The downloaded-game cache: prefer the sibling `games/` folder of this
-/// executable, falling back to the compile-time workspace path.
+/// executable when writable (e.g. unpacked from a DMG/zip), otherwise a
+/// user-writable cache directory (the DMG volume itself is read-only).
 fn games_dir() -> std::path::PathBuf {
     let sibling = exe_dir().join("games");
     if sibling.exists() || std::fs::create_dir_all(&sibling).is_ok() {
         sibling
     } else {
-        std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/games"))
+        user_cache_dir()
     }
+}
+
+/// A writable, per-user cache directory for downloaded game bundles.
+fn user_cache_dir() -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        if let Ok(base) = std::env::var("LOCALAPPDATA") {
+            return std::path::PathBuf::from(base).join("RustP2P").join("games");
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return std::path::PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("RustP2P")
+            .join("games");
+    }
+    std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/games"))
 }
 
 /// The deployment config: a sibling `config.toml` overrides the baked-in
