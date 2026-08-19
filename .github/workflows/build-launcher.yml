@@ -55,9 +55,9 @@ jobs:
           mkdir -p dist/games
 
       - name: Create zip
-        shell: bash
+        shell: pwsh
         run: |
-          tar -a -c -f RustP2P-Launcher-Windows.zip -C dist .
+          Compress-Archive -Path dist/* -DestinationPath RustP2P-Launcher-Windows.zip
 
       - uses: actions/upload-artifact@v4
         with:
