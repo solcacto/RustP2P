@@ -19,6 +19,7 @@ use registry::{fetch_registry, GameListing};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -44,8 +45,9 @@ fn main() -> eframe::Result {
 struct LauncherApp {
     /// Latest registry fetch result (None = in flight / not started).
     games: Arc<Mutex<Option<Result<Vec<GameListing>>>>>,
-    /// Background-refresh state.
-    refreshing: bool,
+    /// Background-refresh state: stays `true` only while a fetch is in flight,
+    /// so repeated clicks / the periodic auto-refresh can actually re-fetch.
+    refreshing: Arc<AtomicBool>,
     /// While a game runs, its stdout is drained here for the status panel.
     child: Option<Child>,
     child_log: Arc<Mutex<VecDeque<String>>>,
@@ -61,7 +63,7 @@ impl Default for LauncherApp {
     fn default() -> Self {
         Self {
             games: Arc::new(Mutex::new(None)),
-            refreshing: false,
+            refreshing: Arc::new(AtomicBool::new(false)),
             child: None,
             child_log: Arc::new(Mutex::new(VecDeque::new())),
             child_log_ui: VecDeque::new(),
@@ -74,11 +76,11 @@ impl Default for LauncherApp {
 
 impl LauncherApp {
     fn refresh(&mut self) {
-        if self.refreshing {
+        if self.refreshing.swap(true, Ordering::SeqCst) {
             return;
         }
-        self.refreshing = true;
         let games = self.games.clone();
+        let refreshing = self.refreshing.clone();
         std::thread::spawn(move || {
             let result = fetch_registry(REGISTRY_URL);
             match &result {
@@ -89,6 +91,7 @@ impl LauncherApp {
                 Err(e) => println!("[launcher] registry fetch FAILED: {e:#}"),
             }
             *games.lock().unwrap() = Some(result);
+            refreshing.store(false, Ordering::SeqCst);
         });
         self.status = "Refreshing game registry…".to_string();
     }
@@ -181,7 +184,7 @@ impl eframe::App for LauncherApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Auto-refresh on first frame, then periodically so a stale first
         // fetch (e.g. a slow CDN propagation) self-corrects.
-        if self.last_refresh.map_or(true, |t| t.elapsed() >= Duration::from_secs(30)) {
+        if self.last_refresh.is_none_or(|t| t.elapsed() >= Duration::from_secs(30)) {
             self.refresh();
             self.last_refresh = Some(Instant::now());
         }
