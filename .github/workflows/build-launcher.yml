@@ -57,7 +57,7 @@ jobs:
       - name: Create zip
         shell: bash
         run: |
-          cd dist && zip -r ../RustP2P-Launcher-Windows.zip . && cd ..
+          tar -a -c -f RustP2P-Launcher-Windows.zip -C dist .
 
       - uses: actions/upload-artifact@v4
         with:
