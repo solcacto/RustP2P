@@ -20,6 +20,7 @@ bevy = { version = "0.14", default-features = false, features = [
     "default_font",
 ] }
 ed25519-dalek = "2"
+flate2 = "1"
 futures-util = "0.3"
 gltf = "1.4"
 hex = "0.4"
@@ -33,6 +34,7 @@ signaling_server = { path = "../signaling_server" }
 sysinfo = "0.30"
 tar = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-tracy = { version = "0.11", optional = true }

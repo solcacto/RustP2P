@@ -27,6 +27,7 @@ pub mod avatar_standard;
 pub mod avatar_state;
 pub mod chunk;
 pub mod cosmetic;
+pub mod deployment;
 pub mod host_functions;
 pub mod host_state;
 pub mod hybrid_connection;

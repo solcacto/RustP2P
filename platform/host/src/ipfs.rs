@@ -177,10 +177,20 @@ fn add_dir_to_tar(builder: &mut tar::Builder<&mut Vec<u8>>, dir: &Path, prefix: 
     Ok(())
 }
 
-/// Extracts a `.tar` bundle into `dest`.
+/// Extracts a `.tar` bundle into `dest`. Gzipped bundles (`.tar.gz`, as
+/// uploaded by `scripts/publish.sh`) are transparently decompressed first;
+/// plain `.tar` bundles keep working unchanged.
 pub fn extract(tar_bytes: &[u8], dest: &Path) -> Result<()> {
+    use std::io::Read;
+
     std::fs::create_dir_all(dest)?;
-    let mut archive = tar::Archive::new(tar_bytes);
+    let reader: Box<dyn Read> = if tar_bytes.starts_with(&[0x1f, 0x8b]) {
+        // gzip magic bytes: wrap the stream in a GzDecoder.
+        Box::new(flate2::read::GzDecoder::new(tar_bytes))
+    } else {
+        Box::new(tar_bytes)
+    };
+    let mut archive = tar::Archive::new(reader);
     archive.set_preserve_permissions(false);
     archive
         .unpack(dest)

@@ -1,0 +1,14 @@
+{
+  "name": "p2p-signal",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Free-tier Cloudflare Worker WebSocket signaling server for the P2P game platform",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260819.1",
+    "typescript": "^7.0.2"
+  }
+}
