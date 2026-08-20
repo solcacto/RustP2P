@@ -28,7 +28,30 @@ pub const ZONE_JOIN_TAG: u8 = 0x03;
 pub const ZONE_STATE_TAG: u8 = 0x04;
 
 /// Local directory (inside the host crate) where owned chunk states persist.
+///
+/// This is the **dev fallback** only: on macOS the compiled-in path resolves
+/// under `~/Documents`, which macOS flags with a privacy prompt, and a mounted
+/// DMG is read-only anyway. Shipped builds use [`chunks_data_dir`] instead.
 pub const CHUNKS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/chunks");
+
+/// Returns a writable, per-user directory for persisted chunk states,
+/// preferring the platform data dir over the dev fallback.
+pub fn chunks_data_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Ok(base) = std::env::var("LOCALAPPDATA") {
+            return PathBuf::from(base).join("RustP2P").join("chunks");
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home)
+            .join("Library")
+            .join("Application Support")
+            .join("RustP2P")
+            .join("chunks");
+    }
+    PathBuf::from(CHUNKS_DIR)
+}
 
 /// A position in the chunk grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -322,9 +345,9 @@ pub struct ChunkStore {
 }
 
 impl ChunkStore {
-    /// A store for `peer_id`, rooted at `CHUNKS_DIR/<peer_id>`.
+    /// A store for `peer_id`, rooted at `<data dir>/chunks/<peer_id>`.
     pub fn new(peer_id: &str) -> Self {
-        Self { dir: PathBuf::from(CHUNKS_DIR).join(peer_id) }
+        Self { dir: chunks_data_dir().join(peer_id) }
     }
 
     /// Writes `state` to `chunk_<x>_<z>.json`.
