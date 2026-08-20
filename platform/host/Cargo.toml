@@ -12,6 +12,7 @@ bevy = { version = "0.14", default-features = false, features = [
     "bevy_render",
     "bevy_pbr",
     "bevy_gltf",
+    "bevy_animation",
     "bevy_asset",
     "bevy_scene",
     "bevy_ui",
@@ -19,6 +20,7 @@ bevy = { version = "0.14", default-features = false, features = [
     "multi_threaded",
     "default_font",
 ] }
+bevy_gltf = { version = "0.14", features = ["bevy_animation"] }
 ed25519-dalek = "2"
 flate2 = "1"
 futures-util = "0.3"

@@ -13,6 +13,7 @@ use crate::avatar_state::{AvatarPose, AvatarState, WorldObject};
 use crate::host_state::{HostState, SignalingStatus};
 use crate::input_state::InputState;
 use crate::profiling::SharedFrameStats;
+use bevy::animation::{AnimationPlugin, RepeatAnimation};
 use bevy::app::AppExit;
 use bevy::core::{FrameCount, TaskPoolPlugin, TypeRegistrationPlugin};
 use bevy::core_pipeline::tonemapping::Tonemapping;
@@ -72,6 +73,97 @@ pub struct RemoteAvatarsHandle(
 #[derive(Resource, Clone)]
 pub struct WorldObjectsHandle(pub Arc<Mutex<Vec<WorldObject>>>);
 
+/// Skeletal avatar locomotion state, carried by each avatar's root entity.
+///
+/// The root entity holds the avatar's world position/facing; a child
+/// `SceneBundle` carries the rigged glTF model and its `AnimationPlayer`. The
+/// renderer links the player once the scene loads, then drives its clip from
+/// the root's world-space velocity (idle stance vs. walk), with no per-game
+/// work. The same rig plays on the local avatar and every remote avatar.
+#[derive(Component)]
+pub struct AvatarAnim {
+    /// The avatar model kind selected for this avatar.
+    pub kind: AvatarKind,
+    /// Entity owning the model's `AnimationPlayer` (filled once the scene
+    /// loads; `Entity::PLACEHOLDER` until then).
+    pub player: Entity,
+    /// Smoothed movement speed in units/second.
+    pub speed: f32,
+    /// Last frame's translation, used to detect movement.
+    pub last_pos: Vec3,
+}
+
+/// Which rigged avatar model a game has selected. Games pick one by avatar
+/// asset path (e.g. a path containing "fox" selects the animal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AvatarKind {
+    /// The CC0 humanoid (CesiumMan, CC-BY 4.0).
+    Human,
+    /// The MIT fox (quadruped). Assets wired in but not yet driven.
+    Fox,
+}
+
+impl AvatarKind {
+    /// Resolves the avatar model from the avatar asset path.
+    pub fn for_path(path: &str) -> Self {
+        if path.contains("fox") {
+            Self::Fox
+        } else {
+            Self::Human
+        }
+    }
+}
+
+/// Marks the entity that owns a linked `AnimationPlayer` (the player lands on a
+/// scene child, not the avatar root entity).
+#[derive(Component)]
+pub struct AvatarPlayer;
+
+/// Marks the child `SceneBundle` holding an avatar's rigged model.
+#[derive(Component)]
+pub struct AvatarScene;
+
+/// A rigged avatar model: its glTF scene and a graph over its animation clips,
+/// plus the local-space scale/lift that puts the model's feet on the ground
+/// (models are authored at very different sizes).
+#[derive(Resource, Clone)]
+pub struct AvatarModel {
+    /// The model's glTF default scene.
+    pub scene: Handle<Scene>,
+    /// Animation graph over the model's clips.
+    pub graph: Handle<AnimationGraph>,
+    /// Clip node that plays the model's walk cycle.
+    pub walk: AnimationNodeIndex,
+    /// Uniform scale bringing the model to the standard ~2-unit avatar height.
+    pub scale: f32,
+    /// Extra Y offset so the model's feet rest on the ground plane.
+    pub lift: f32,
+}
+
+/// All rigged avatar models the renderer can spawn, keyed by [`AvatarKind`].
+#[derive(Resource, Clone)]
+pub struct AvatarModels {
+    pub human: AvatarModel,
+}
+
+impl AvatarModels {
+    /// Resolves the model for a kind. Un-wired kinds (e.g. Fox) fall back to
+    /// the humanoid until their assets are integrated.
+    pub fn model(&self, kind: AvatarKind) -> &AvatarModel {
+        match kind {
+            AvatarKind::Human | AvatarKind::Fox => &self.human,
+        }
+    }
+}
+
+/// glTF handles loading the avatar models, keyed by [`AvatarKind`]. The rigged
+/// scenes aren't usable until their assets (and dependencies) finish loading,
+/// so `build_avatar_models` waits on these and then publishes [`AvatarModels`].
+#[derive(Resource)]
+pub struct AvatarGltfLoads {
+    pub human: Handle<Gltf>,
+}
+
 /// Shared unit cube mesh used for every guest-drawn box.
 #[derive(Resource, Clone)]
 pub struct WorldObjectMeshHandle(pub Handle<Mesh>);
@@ -79,36 +171,6 @@ pub struct WorldObjectMeshHandle(pub Handle<Mesh>);
 /// Marks a cube entity that mirrors one guest-drawn world object.
 #[derive(Component)]
 pub struct WorldObjectCube;
-
-/// The shared merged avatar mesh — every avatar renders with this single low-poly
-/// mesh so Bevy can batch them into a few draw calls.
-#[derive(Resource, Clone)]
-pub struct AvatarMeshHandle(pub Handle<Mesh>);
-
-/// Shared materials keyed by avatar path: choosing `--avatar`/`load_avatar`
-/// picks a different body color, but each variant is a single shared material so
-/// draw-call batching is preserved.
-#[derive(Resource, Clone)]
-pub struct AvatarMaterialPalette {
-    /// One shared material per avatar asset path (same geometry, different color).
-    pub by_path: HashMap<String, Handle<StandardMaterial>>,
-    /// Fallback material for unknown paths.
-    pub default: Handle<StandardMaterial>,
-}
-
-impl AvatarMaterialPalette {
-    /// Resolves the material for an avatar path (falling back to the default).
-    pub fn material(&self, path: &str) -> Handle<StandardMaterial> {
-        self.by_path
-            .get(path)
-            .cloned()
-            .unwrap_or_else(|| self.default.clone())
-    }
-}
-
-/// Shared material for every remote avatar (blue, all instances batched).
-#[derive(Resource, Clone)]
-pub struct RemoteMaterialHandle(pub Handle<StandardMaterial>);
 
 /// Marker identifying the loaded Universal Avatar scene root.
 #[derive(Component)]
@@ -260,6 +322,7 @@ pub fn build_app(
         CorePipelinePlugin,
         PbrPlugin::default(),
         bevy::gltf::GltfPlugin::default(),
+        AnimationPlugin::default(),
         SpritePlugin,
         TextPlugin,
         UiPlugin,
@@ -288,6 +351,7 @@ pub fn build_app(
         (
             read_keyboard,
             wasm_render_tick,
+            build_avatar_models,
             sync_avatar_scene,
             apply_avatar_pose,
             sync_world_objects,
@@ -295,6 +359,8 @@ pub fn build_app(
             update_chunk_claims,
             zone_transition,
             sync_remote_avatars,
+            link_avatar_players,
+            animate_avatars,
             attach_cosmetics,
             monitor_signaling,
             measure_rtt,
@@ -877,14 +943,64 @@ fn zone_transition(
     }
 }
 
+/// Builds the [`AvatarModels`] resources once each rigged glTF has finished
+/// loading. For each model it picks the default scene, wraps its first
+/// animation clip in a graph (walk clip = node 0), and records the scale/lift
+/// that place the model's feet on the ground.
+fn build_avatar_models(
+    mut commands: Commands,
+    loads: Option<Res<AvatarGltfLoads>>,
+    mut events: EventReader<AssetEvent<Gltf>>,
+    gltf_assets: Res<Assets<Gltf>>,
+    mut graph_assets: ResMut<Assets<AnimationGraph>>,
+    existing: Option<Res<AvatarModels>>,
+) {
+    let Some(loads) = loads else { return };
+    if existing.is_some() {
+        return;
+    }
+    for event in events.read() {
+        let AssetEvent::LoadedWithDependencies { id } = *event else {
+            continue;
+        };
+        if id != loads.human.id() {
+            continue;
+        }
+        let Some(gltf) = gltf_assets.get(id) else {
+            continue;
+        };
+        let Some(scene) = gltf.default_scene.clone() else {
+            continue;
+        };
+        // The humanoid's single clip is its walk cycle (node 0 of the graph).
+        let Some(clip) = gltf.animations.first() else {
+            continue;
+        };
+        let (graph, walk) = AnimationGraph::from_clip(clip.clone());
+        let graph = graph_assets.add(graph);
+        commands.insert_resource(AvatarModels {
+            human: AvatarModel {
+                scene,
+                graph,
+                walk,
+                // CesiumMan is 1.14 units tall with feet at y=-0.569; raise and
+                // scale so it reads as a ~2-unit avatar standing on the plane.
+                scale: 1.75,
+                lift: 1.0,
+            },
+        });
+        println!("[avatar] human rig loaded (walk clip node {walk:?})");
+        break;
+    }
+}
+
 /// Spawns (and hot-swaps) the local avatar scene from the avatar path in host
 /// state, so the avatar is configurable before the game starts and can be
 /// changed at runtime by the guest's `load_avatar`.
 fn sync_avatar_scene(
     runtime: Res<WasmRuntime>,
     mut commands: Commands,
-    avatar_mesh: Res<AvatarMeshHandle>,
-    palette: Res<AvatarMaterialPalette>,
+    models: Option<Res<AvatarModels>>,
     avatars: Query<(Entity, &AvatarSource), With<Avatar>>,
 ) {
     let desired = runtime
@@ -900,31 +1016,53 @@ fn sync_avatar_scene(
         }
         Some((entity, _)) => {
             commands.entity(entity).despawn();
-            spawn_avatar(&mut commands, &avatar_mesh.0, &palette, desired);
+            if let Some(models) = models.as_ref() {
+                spawn_avatar(&mut commands, models, desired);
+            }
         }
-        None => spawn_avatar(&mut commands, &avatar_mesh.0, &palette, desired),
+        None => {
+            if let Some(models) = models.as_ref() {
+                spawn_avatar(&mut commands, models, desired);
+            }
+        }
     }
 }
 
-/// Spawns the local avatar as a single batched mesh entity (one draw call),
-/// tinted by the avatar-path material palette, mirroring the pose applied by
-/// `apply_avatar_pose`.
-fn spawn_avatar(
-    commands: &mut Commands,
-    mesh: &Handle<Mesh>,
-    palette: &AvatarMaterialPalette,
-    path: String,
-) {
-    commands.spawn((
-        MaterialMeshBundle {
-            mesh: mesh.clone(),
-            material: palette.material(&path),
-            transform: Transform::from_xyz(0.0, 0.0, 0.0),
-            ..default()
-        },
-        Avatar,
-        AvatarSource(path),
-    ));
+/// Spawns the local avatar: a root entity carrying the pose/walk state and a
+/// child `SceneBundle` holding the rigged model selected by the avatar path.
+/// The child's `AnimationPlayer` is linked by `link_avatar_players` once the
+/// scene loads. Mirrors the pose applied by `apply_avatar_pose`.
+fn spawn_avatar(commands: &mut Commands, models: &AvatarModels, path: String) {
+    let kind = AvatarKind::for_path(&path);
+    let model = models.model(kind);
+    let root = commands
+        .spawn((
+            Avatar,
+            AvatarSource(path),
+            TransformBundle::default(),
+            VisibilityBundle::default(),
+            AvatarAnim {
+                kind,
+                player: Entity::PLACEHOLDER,
+                speed: 0.0,
+                last_pos: Vec3::ZERO,
+            },
+        ))
+        .id();
+    commands.entity(root).with_children(|parent| {
+        parent.spawn((
+            SceneBundle {
+                scene: model.scene.clone(),
+                transform: Transform {
+                    translation: Vec3::new(0.0, model.lift, 0.0),
+                    scale: Vec3::splat(model.scale),
+                    ..default()
+                },
+                ..default()
+            },
+            AvatarScene,
+        ));
+    });
 }
 
 /// Query of every avatar scene root (local or remote).
@@ -988,15 +1126,13 @@ fn attachment_offset(point: AttachmentPoint) -> Vec3 {
 }
 
 /// Spawns, updates, and despawns remote avatar entities from the shared pose
-/// map: one batched mesh entity per remote peer, sharing a single blue
-/// material (so all remotes batch into one draw call), removed if it stops
-/// reporting for more than 2 seconds.
+/// map: one rigged scene root per remote peer (same model as the local avatar),
+/// removed if it stops reporting for more than 2 seconds.
 fn sync_remote_avatars(
     handle: Res<RemoteAvatarsHandle>,
     runtime: Res<WasmRuntime>,
     mut commands: Commands,
-    avatar_mesh: Res<AvatarMeshHandle>,
-    remote_material: Res<RemoteMaterialHandle>,
+    models: Option<Res<AvatarModels>>,
     mut avatars: Query<(Entity, &RemotePeerId, &mut Transform)>,
 ) {
     let now = Instant::now();
@@ -1022,6 +1158,10 @@ fn sync_remote_avatars(
         commands.entity(entity).despawn();
     }
 
+    let kind = AvatarKind::for_path(&avatar_path);
+    let Some(model) = models.as_ref().map(|m| m.model(kind)) else {
+        return;
+    };
     for (peer_id, pose) in map.iter() {
         if now.duration_since(pose.last_seen).as_secs_f32() >= 2.0 {
             continue;
@@ -1032,20 +1172,131 @@ fn sync_remote_avatars(
                 transform.rotation = Quat::from_rotation_y(pose.rot_y);
             }
             None => {
-                commands.spawn((
-                    MaterialMeshBundle {
-                        mesh: avatar_mesh.0.clone(),
-                        material: remote_material.0.clone(),
-                        transform: Transform::from_translation(Vec3::new(pose.x, pose.y, pose.z)),
-                        ..default()
-                    },
-                    RemoteAvatar,
-                    RemotePeerId(peer_id.clone()),
-                    AvatarSource(avatar_path.clone()),
-                    // Only the local avatar casts shadows (cheaper shadow pass).
-                    NotShadowCaster,
-                ));
+                let root = commands
+                    .spawn((
+                        RemoteAvatar,
+                        RemotePeerId(peer_id.clone()),
+                        AvatarSource(avatar_path.clone()),
+                        TransformBundle::default(),
+                        VisibilityBundle::default(),
+                        AvatarAnim {
+                            kind,
+                            player: Entity::PLACEHOLDER,
+                            speed: 0.0,
+                            last_pos: Vec3::new(pose.x, pose.y, pose.z),
+                        },
+                    ))
+                    .id();
+                commands.entity(root).with_children(|parent| {
+                    parent.spawn((
+                        SceneBundle {
+                            scene: model.scene.clone(),
+                            transform: Transform {
+                                translation: Vec3::new(0.0, model.lift, 0.0),
+                                scale: Vec3::splat(model.scale),
+                                ..default()
+                            },
+                            ..default()
+                        },
+                        AvatarScene,
+                        // Only the local avatar casts shadows (cheaper shadow pass).
+                        NotShadowCaster,
+                    ));
+                });
             }
+        }
+    }
+}
+
+/// Links each avatar's rigged scene to its `AnimationPlayer` once the scene has
+/// loaded (Bevy auto-adds the player to the spawned scene). Walks up the parent
+/// chain to find the owning avatar root, attaches the model's animation graph,
+/// freezes the clip at its neutral stance, and records the player entity on the
+/// root so `animate_avatars` can drive it.
+fn link_avatar_players(
+    mut commands: Commands,
+    models: Option<Res<AvatarModels>>,
+    mut avatars: Query<(Entity, &mut AvatarAnim)>,
+    mut players: Query<(Entity, &mut AnimationPlayer), Added<AnimationPlayer>>,
+    markers: Query<(Entity, Option<&Avatar>, Option<&RemoteAvatar>)>,
+    parents: Query<&Parent>,
+) {
+    let Some(models) = models else { return };
+    for (player_entity, mut player) in &mut players {
+        let mut cur = player_entity;
+        let mut root = None;
+        loop {
+            if let Ok((_, avatar, remote)) = markers.get(cur) {
+                if avatar.is_some() || remote.is_some() {
+                    root = Some(cur);
+                    break;
+                }
+            }
+            match parents.get(cur) {
+                Ok(parent) => cur = parent.get(),
+                Err(_) => break,
+            }
+        }
+        let Some(root) = root else { continue };
+
+        let kind = avatars.get(root).ok().map(|(_, anim)| anim.kind);
+        let Some(kind) = kind else { continue };
+        let model = models.model(kind);
+
+        player.play(model.walk);
+        if let Some(anim) = player.animation_mut(model.walk) {
+            anim.set_repeat(RepeatAnimation::Forever);
+            anim.pause();
+        }
+        commands.entity(player_entity).insert((AvatarPlayer, model.graph.clone()));
+        if let Ok((_, mut anim)) = avatars.get_mut(root) {
+            anim.player = player_entity;
+        }
+    }
+}
+
+/// Drives the universal avatar walk on every rigged avatar.
+///
+/// Velocity is inferred from each avatar root's world-space translation (no
+/// game involvement needed): when moving, the avatar turns to face its travel
+/// direction and the walk clip plays at a speed-proportional rate; when idle it
+/// freezes at the neutral stance frame and keeps the game-set rotation.
+fn animate_avatars(
+    time: Res<Time>,
+    models: Option<Res<AvatarModels>>,
+    mut avatars: Query<(&mut AvatarAnim, &mut Transform)>,
+    mut players: Query<(Entity, &mut AnimationPlayer), With<AvatarPlayer>>,
+) {
+    let Some(models) = models else { return };
+    let dt = time.delta_seconds_f64().max(1e-6) as f32;
+    for (mut anim, mut transform) in &mut avatars {
+        let pos = transform.translation;
+        let disp = pos - anim.last_pos;
+        let instant = (disp.length() / dt).min(20.0);
+        anim.speed += (instant - anim.speed) * 0.3;
+        anim.last_pos = pos;
+
+        if anim.speed > 0.15 {
+            // Face the horizontal direction of travel (local +Z = forward).
+            let yaw = disp.x.atan2(disp.z);
+            transform.rotation = Quat::from_rotation_y(yaw);
+        }
+
+        let Ok((_, mut player)) = players.get_mut(anim.player) else {
+            continue;
+        };
+        let model = models.model(anim.kind);
+        let moving = anim.speed > 0.15;
+        let Some(clip) = player.animation_mut(model.walk) else {
+            continue;
+        };
+        if moving {
+            let rate = (anim.speed / 3.0).clamp(0.25, 2.0);
+            clip.resume();
+            clip.set_speed(rate);
+        } else {
+            clip.pause();
+            clip.seek_to(0.0);
         }
     }
 }
@@ -1065,6 +1316,7 @@ fn setup_scene(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    asset_server: Res<AssetServer>,
 ) {
     commands.spawn(Camera3dBundle {
         transform: Transform::from_xyz(0.0, 3.0, 7.0).looking_at(Vec3::new(0.0, 0.8, 0.0), Vec3::Y),
@@ -1095,44 +1347,12 @@ fn setup_scene(
         ..default()
     });
 
-    // One merged low-poly avatar mesh. The local avatar's material is chosen
-    // from a palette keyed by avatar path (restores `--avatar`/`load_avatar`
-    // color variants, e.g. standard vs blue), and every remote avatar shares a
-    // single blue material — so all avatars batch into a handful of draw calls.
-    let avatar_mesh = meshes.add(build_avatar_mesh());
-    let palette = AvatarMaterialPalette {
-        by_path: HashMap::from([
-            (
-                "avatar_standard.glb".to_string(),
-                materials.add(StandardMaterial {
-                    base_color: Color::srgb(0.72, 0.72, 0.78),
-                    perceptual_roughness: 0.85,
-                    ..default()
-                }),
-            ),
-            (
-                "avatars/blue.glb".to_string(),
-                materials.add(StandardMaterial {
-                    base_color: Color::srgb(0.20, 0.35, 0.95),
-                    perceptual_roughness: 0.85,
-                    ..default()
-                }),
-            ),
-        ]),
-        default: materials.add(StandardMaterial {
-            base_color: Color::srgb_u8(200, 205, 215),
-            perceptual_roughness: 0.85,
-            ..default()
-        }),
-    };
-    let remote_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.20, 0.35, 0.95),
-        perceptual_roughness: 0.85,
-        ..default()
-    });
-    commands.insert_resource(AvatarMeshHandle(avatar_mesh));
-    commands.insert_resource(palette);
-    commands.insert_resource(RemoteMaterialHandle(remote_material));
+    // Rigged avatar models: the glTF scenes are loaded here and their animation
+    // graphs are built in `build_avatar_models` once the assets finish loading.
+    // All avatar material/color variants are gone — the model carries its own
+    // baked materials.
+    let human_scene = asset_server.load::<Gltf>("avatars/human.glb");
+    commands.insert_resource(AvatarGltfLoads { human: human_scene });
     commands.insert_resource(WorldObjectMeshHandle(meshes.add(Cuboid::new(1.0, 1.0, 1.0))));
 
     commands.spawn((
@@ -1154,147 +1374,40 @@ fn setup_scene(
     ));
 }
 
-/// Builds the shared low-poly humanoid mesh by merging the avatar's body boxes
-/// into a single indexed mesh, so every avatar is one entity + one draw call.
-fn build_avatar_mesh() -> Mesh {
-    use bevy::render::mesh::{Indices, PrimitiveTopology};
-    use bevy::render::render_asset::RenderAssetUsages;
+#[cfg(test)]
+mod avatar_tests {
+    use super::*;
 
-    // (center, size) of each box making up the humanoid body.
-    const BODY: [([f32; 3], [f32; 3]); 15] = [
-        ([0.0, 1.0, 0.0], [0.3, 0.2, 0.2]),
-        ([0.0, 1.45, 0.0], [0.36, 0.7, 0.22]),
-        ([0.0, 1.98, 0.0], [0.24, 0.28, 0.24]),
-        ([-0.55, 1.6, 0.0], [0.55, 0.13, 0.13]),
-        ([-1.0, 1.6, 0.0], [0.45, 0.11, 0.11]),
-        ([-1.22, 1.6, 0.0], [0.2, 0.1, 0.1]),
-        ([0.55, 1.6, 0.0], [0.55, 0.13, 0.13]),
-        ([1.0, 1.6, 0.0], [0.45, 0.11, 0.11]),
-        ([1.22, 1.6, 0.0], [0.2, 0.1, 0.1]),
-        ([-0.12, 0.72, 0.0], [0.14, 0.55, 0.16]),
-        ([-0.12, 0.32, 0.0], [0.11, 0.4, 0.12]),
-        ([-0.12, 0.06, 0.03], [0.12, 0.1, 0.22]),
-        ([0.12, 0.72, 0.0], [0.14, 0.55, 0.16]),
-        ([0.12, 0.32, 0.0], [0.11, 0.4, 0.12]),
-        ([0.12, 0.06, 0.03], [0.12, 0.1, 0.22]),
-    ];
-
-    let mut positions: Vec<[f32; 3]> = Vec::new();
-    let mut normals: Vec<[f32; 3]> = Vec::new();
-    for (center, size) in BODY {
-        let (p, n) = box_geometry(center, size);
-        positions.extend(p);
-        normals.extend(n);
+    #[test]
+    fn kind_resolves_from_avatar_path() {
+        assert_eq!(AvatarKind::for_path("avatars/blue.glb"), AvatarKind::Human);
+        assert_eq!(AvatarKind::for_path("avatar_standard.glb"), AvatarKind::Human);
+        assert_eq!(AvatarKind::for_path("avatars/fox.glb"), AvatarKind::Fox);
+        assert_eq!(AvatarKind::for_path("fox.glb"), AvatarKind::Fox);
     }
-    let indices: Vec<u32> = (0..positions.len() as u32).collect();
 
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
-    );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_indices(Indices::U32(indices));
-    mesh
-}
-
-/// Flat-shaded box geometry (non-indexed: per-face vertices so normals are flat).
-fn box_geometry(center: [f32; 3], size: [f32; 3]) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
-    let [cx, cy, cz] = center;
-    let (hw, hh, hd) = (size[0] / 2.0, size[1] / 2.0, size[2] / 2.0);
-    let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
-        (
-            [1.0, 0.0, 0.0],
-            [
-                [cx + hw, cy - hh, cz - hd],
-                [cx + hw, cy - hh, cz + hd],
-                [cx + hw, cy + hh, cz + hd],
-                [cx + hw, cy + hh, cz - hd],
-            ],
-        ),
-        (
-            [-1.0, 0.0, 0.0],
-            [
-                [cx - hw, cy - hh, cz + hd],
-                [cx - hw, cy - hh, cz - hd],
-                [cx - hw, cy + hh, cz - hd],
-                [cx - hw, cy + hh, cz + hd],
-            ],
-        ),
-        (
-            [0.0, 1.0, 0.0],
-            [
-                [cx - hw, cy + hh, cz - hd],
-                [cx - hw, cy + hh, cz + hd],
-                [cx + hw, cy + hh, cz + hd],
-                [cx + hw, cy + hh, cz - hd],
-            ],
-        ),
-        (
-            [0.0, -1.0, 0.0],
-            [
-                [cx - hw, cy - hh, cz + hd],
-                [cx - hw, cy - hh, cz - hd],
-                [cx + hw, cy - hh, cz - hd],
-                [cx + hw, cy - hh, cz + hd],
-            ],
-        ),
-        (
-            [0.0, 0.0, 1.0],
-            [
-                [cx - hw, cy - hh, cz + hd],
-                [cx + hw, cy - hh, cz + hd],
-                [cx + hw, cy + hh, cz + hd],
-                [cx - hw, cy + hh, cz + hd],
-            ],
-        ),
-        (
-            [0.0, 0.0, -1.0],
-            [
-                [cx + hw, cy - hh, cz - hd],
-                [cx - hw, cy - hh, cz - hd],
-                [cx - hw, cy + hh, cz - hd],
-                [cx + hw, cy + hh, cz - hd],
-            ],
-        ),
-    ];
-    let mut positions = Vec::new();
-    let mut normals = Vec::new();
-    for (n, corners) in faces {
-        let mut tris = [
-            [corners[0], corners[1], corners[2]],
-            [corners[0], corners[2], corners[3]],
-        ];
-        for tri in &mut tris {
-            let u = [
-                tri[1][0] - tri[0][0],
-                tri[1][1] - tri[0][1],
-                tri[1][2] - tri[0][2],
-            ];
-            let v = [
-                tri[2][0] - tri[0][0],
-                tri[2][1] - tri[0][1],
-                tri[2][2] - tri[0][2],
-            ];
-            let cross = [
-                u[1] * v[2] - u[2] * v[1],
-                u[2] * v[0] - u[0] * v[2],
-                u[0] * v[1] - u[1] * v[0],
-            ];
-            if cross[0] * n[0] + cross[1] * n[1] + cross[2] * n[2] < 0.0 {
-                tri.swap(1, 2);
-            }
-        }
-        for tri in tris {
-            positions.push(tri[0]);
-            positions.push(tri[1]);
-            positions.push(tri[2]);
-            normals.push(n);
-            normals.push(n);
-            normals.push(n);
-        }
+    #[test]
+    fn un_wired_kinds_fall_back_to_human() {
+        let models = AvatarModels {
+            human: AvatarModel {
+                scene: Handle::default(),
+                graph: Handle::default(),
+                walk: AnimationNodeIndex::default(),
+                scale: 1.75,
+                lift: 1.0,
+            },
+        };
+        assert_eq!(models.model(AvatarKind::Human).scale, 1.75);
+        assert_eq!(models.model(AvatarKind::Fox).scale, 1.75);
     }
-    (positions, normals)
+
+    #[test]
+    fn walk_rate_is_clamped() {
+        let rate = |speed: f32| (speed / 3.0).clamp(0.25, 2.0);
+        assert_eq!(rate(0.1), 0.25, "idle-ish speed floors at quarter rate");
+        assert_eq!(rate(3.0), 1.0, "typical walk speed plays at 1x");
+        assert_eq!(rate(9.0), 2.0, "sprint caps at double rate");
+    }
 }
 
 /// Registers the frame-limit terminator used by the integration tests.

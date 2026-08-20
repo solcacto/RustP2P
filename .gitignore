@@ -6,3 +6,10 @@ platform/games/test_world/
 platform/host/chunks/
 /dist/
 platform/games/pickup_blocks/target/
+
+# Secrets — never commit
+JWT.rtf
+*.jwt
+
+# macOS cruft
+.DS_Store
