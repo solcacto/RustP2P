@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "author": "dev",
   "wasm_entry": "pickup_blocks.wasm",
-  "wasm_hash": "sha256:08c6169f2d7a115285d438e891e380d1c58f46bc3808f15cff1a57a0c0adb9bd",
+  "wasm_hash": "sha256:d42d20629b1919fc91f571b4ced4362e3fca5db2ecd95c81df80fd70d302c8ed",
   "mode": "solo",
   "max_players": 8,
   "avatar_skeleton": "standard_v1",
@@ -13,5 +13,5 @@
     "render"
   ],
   "signer_pubkey": "ed25519:d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
-  "signature": "ed25519_sig:b10be65ccb1be8265a44732ad7377b4c659b438ab0e5336e0b4019941adb4c630ed4491cd6891e2333d8e4ac71ef167cf966356d9a0de70a1769fe0c48f29a0d"
+  "signature": "ed25519_sig:188b1a9d46409d39b3fed2f0cdd96d0087a16c1b81698d3e482f6f56e72349d3c0e2a227f03510eb15db69bcb095953b0302c8631739781b3ea8794ca418450a"
 }

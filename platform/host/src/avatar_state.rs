@@ -57,3 +57,21 @@ impl Default for AvatarPose {
         }
     }
 }
+
+/// A colored box the guest asked to be rendered for the current frame, written
+/// through the `draw_box` host function and drained by the renderer.
+#[derive(Debug, Clone, Copy)]
+pub struct WorldObject {
+    /// World-space center translation.
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    /// Half-extents along each axis.
+    pub sx: f32,
+    pub sy: f32,
+    pub sz: f32,
+    /// RGB color in `[0, 1]`.
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+}

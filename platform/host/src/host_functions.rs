@@ -51,6 +51,54 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<()> {
 
     linker.func_wrap(
         "env",
+        "get_delta_seconds",
+        |caller: Caller<'_, HostState>| -> Result<f64> {
+            Ok(caller.data().delta_time())
+        },
+    )?;
+
+    linker.func_wrap(
+        "env",
+        "draw_box",
+        |mut caller: Caller<'_, HostState>,
+         x: f32,
+         y: f32,
+         z: f32,
+         sx: f32,
+         sy: f32,
+         sz: f32,
+         r: f32,
+         g: f32,
+         b: f32| -> Result<()> {
+            if !(x.is_finite()
+                && y.is_finite()
+                && z.is_finite()
+                && sx.is_finite()
+                && sy.is_finite()
+                && sz.is_finite()
+                && r.is_finite()
+                && g.is_finite()
+                && b.is_finite())
+            {
+                return Ok(());
+            }
+            caller.data_mut().world_objects().lock().unwrap().push(crate::avatar_state::WorldObject {
+                x,
+                y,
+                z,
+                sx,
+                sy,
+                sz,
+                r,
+                g,
+                b,
+            });
+            Ok(())
+        },
+    )?;
+
+    linker.func_wrap(
+        "env",
         "get_input_move_up",
         |caller: Caller<'_, HostState>| -> Result<u32> {
             Ok(caller.data().input().move_up as u32)

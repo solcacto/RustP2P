@@ -6,8 +6,8 @@
 
 use guest_sdk::prelude::*;
 
-/// Units moved per frame while a movement key is held.
-const SPEED: f32 = 0.08;
+/// Units per second while a movement key is held (scaled by delta time).
+const SPEED: f32 = 5.0;
 /// Distance at which a block is picked up.
 const PICKUP_DIST: f32 = 0.6;
 /// World half-extent (the player wraps around at +/- this value).
@@ -58,20 +58,23 @@ impl Game for PickupBlocks {
 
     fn tick(&mut self, ctx: &mut Context) {
         let input = ctx.input();
+        let dt = ctx.delta_seconds() as f32;
 
-        // 1. Movement: WASD / arrows. Action 1 rotates the avatar so you can
-        // look around; the block pickup check is distance-based.
+        // 1. Movement: WASD / arrows, scaled by delta time so the avatar moves
+        // at a constant speed regardless of the renderer's frame rate. Action 1
+        // rotates the avatar so you can look around; pickup is distance-based.
+        let step = SPEED * dt;
         if input.up {
-            self.z -= SPEED;
+            self.z -= step;
         }
         if input.down {
-            self.z += SPEED;
+            self.z += step;
         }
         if input.left {
-            self.x -= SPEED;
+            self.x -= step;
         }
         if input.right {
-            self.x += SPEED;
+            self.x += step;
         }
         if input.action_1 {
             self.rot_y += 0.08;
@@ -109,10 +112,35 @@ impl Game for PickupBlocks {
             }
         }
 
-        // 4. Move the local avatar (no peers in solo mode, so no broadcast).
+        // 4. Draw the remaining blocks so they're visible in the scene. Taken
+        // blocks are skipped, so they vanish once collected. Each block sits
+        // flat on the ground (center at half its height) with a distance-based
+        // glow so nearby targets stand out.
+        for block in self.blocks.iter() {
+            if block.taken {
+                continue;
+            }
+            let dist = ((block.x - self.x) * (block.x - self.x)
+                + (block.z - self.z) * (block.z - self.z))
+            .sqrt();
+            let glow = (1.2 - dist * 0.1).clamp(0.35, 1.0);
+            ctx.draw_box(
+                block.x,
+                0.45,
+                block.z,
+                0.9,
+                0.9,
+                0.9,
+                0.2 + 0.5 * glow,
+                0.7 * glow,
+                0.9 * glow,
+            );
+        }
+
+        // 5. Move the local avatar (no peers in solo mode, so no broadcast).
         ctx.set_avatar_transform(self.x, 0.0, self.z, self.rot_y);
 
-        // 5. Share the pose and score so a later multiplayer session sees us.
+        // 6. Share the pose and score so a later multiplayer session sees us.
         ctx.broadcast_pose(self.x, 0.0, self.z, self.rot_y);
         ctx.broadcast_tag_score(self.score);
     }

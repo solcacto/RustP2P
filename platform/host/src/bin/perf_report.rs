@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use host::{
-    avatar_state::{AvatarPose, AvatarState},
+    avatar_state::{AvatarPose, AvatarState, WorldObject},
     host_functions,
     host_state::HostState,
     manifest::GameManifest,
@@ -40,6 +40,7 @@ fn main() -> Result<()> {
     let avatar_state = Arc::new(Mutex::new(AvatarState::default()));
     let remote_avatars: Arc<Mutex<HashMap<String, AvatarPose>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let world_objects: Arc<Mutex<Vec<WorldObject>>> = Arc::new(Mutex::new(Vec::new()));
     let stats = SharedFrameStats::default();
 
     // Instantiate the guest.
@@ -53,11 +54,13 @@ fn main() -> Result<()> {
         .data_mut()
         .set_avatar_state(Some(avatar_state.clone()));
     store.data_mut().set_remote_avatars(remote_avatars.clone());
+    store.data_mut().set_world_objects(world_objects.clone());
     let instance = linker.instantiate(&mut store, &module)?;
     let tick = instance.get_typed_func::<(), ()>(&mut store, "game_tick")?;
 
     // Build the app with our stats collector, run N frames, then exit.
-    let mut app = renderer::build_app(avatar_state.clone(), remote_avatars.clone());
+    let mut app =
+        renderer::build_app(avatar_state.clone(), remote_avatars.clone(), world_objects.clone());
     app.insert_resource(stats.clone());
     let store_handle = Arc::new(Mutex::new(store));
     app.insert_resource(renderer::WasmRuntime {

@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use host::{
-    avatar_state::{AvatarPose, AvatarState},
+    avatar_state::{AvatarPose, AvatarState, WorldObject},
     host_functions,
     host_state::HostState,
     renderer,
@@ -16,6 +16,7 @@ fn main() -> Result<()> {
     let avatar_state = Arc::new(Mutex::new(AvatarState::default()));
     let remote_avatars: Arc<Mutex<HashMap<String, AvatarPose>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let world_objects: Arc<Mutex<Vec<WorldObject>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Instantiate the Wasm render module.
     let engine = Engine::default();
@@ -30,7 +31,8 @@ fn main() -> Result<()> {
 
     // Build the Bevy renderer and give it the Wasm runtime so one guest tick
     // runs per rendered frame.
-    let mut app = renderer::build_app(avatar_state.clone(), remote_avatars.clone());
+    let mut app =
+        renderer::build_app(avatar_state.clone(), remote_avatars.clone(), world_objects.clone());
     let store_handle = Arc::new(Mutex::new(store));
     app.insert_resource(renderer::WasmRuntime {
         store: store_handle.clone(),

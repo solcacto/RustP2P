@@ -81,6 +81,18 @@ impl Context {
         bridge::frame_count()
     }
 
+    /// Seconds elapsed since the previous frame. Use this to scale movement so
+    /// it stays constant regardless of the renderer's frame rate.
+    pub fn delta_seconds(&self) -> f64 {
+        bridge::delta_seconds()
+    }
+
+    /// Renders a colored box at a world position for the current frame. All
+    /// boxes drawn this frame replace the previous frame's boxes.
+    pub fn draw_box(&self, x: f32, y: f32, z: f32, sx: f32, sy: f32, sz: f32, r: f32, g: f32, b: f32) {
+        bridge::draw_box(x, y, z, sx, sy, sz, r, g, b);
+    }
+
     /// Reads this frame's input snapshot.
     pub fn input(&self) -> InputState {
         InputState {

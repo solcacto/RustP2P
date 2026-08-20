@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use host::{
     avatar_standard,
-    avatar_state::{AvatarPose, AvatarState},
+    avatar_state::{AvatarPose, AvatarState, WorldObject},
     cosmetic,
     deployment::{DeploymentConfig, NetworkConfig},
     host_functions,
@@ -170,6 +170,7 @@ fn main() -> Result<()> {
     let avatar_state = Arc::new(Mutex::new(AvatarState::default()));
     let remote_avatars: Arc<Mutex<HashMap<String, AvatarPose>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let world_objects: Arc<Mutex<Vec<WorldObject>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Determine the game package location: from IPFS by CID, an explicit
     // --package directory, or the local guest directory.
@@ -280,6 +281,7 @@ fn main() -> Result<()> {
         .data_mut()
         .set_avatar_state(Some(avatar_state.clone()));
     store.data_mut().set_remote_avatars(remote_avatars.clone());
+    store.data_mut().set_world_objects(world_objects.clone());
     store.data_mut().set_movement_axis(axis);
     store.data_mut().set_avatar_path(avatar_path.clone());
     if solo {
@@ -314,7 +316,8 @@ fn main() -> Result<()> {
     println!("[{role}] hosting chunks (0,0) and (1,0) (registered in the chunk DHT)");
 
     // Build the Bevy renderer: one guest `game_tick` per rendered frame.
-    let mut app = renderer::build_app(avatar_state.clone(), remote_avatars.clone());
+    let mut app =
+        renderer::build_app(avatar_state.clone(), remote_avatars.clone(), world_objects.clone());
     let store_handle = Arc::new(Mutex::new(store));
     app.insert_resource(renderer::AutoInput(auto));
     app.insert_resource(renderer::CosmeticSlots(cosmetics));

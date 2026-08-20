@@ -1,5 +1,8 @@
 use anyhow::{bail, Result};
-use host::{avatar_state::AvatarState, host_functions, host_state::HostState, renderer};
+use host::{
+    avatar_state::{AvatarState, WorldObject},
+    host_functions, host_state::HostState, renderer,
+};
 use std::sync::{Arc, Mutex};
 use wasmtime::{Engine, Linker, Module, Store};
 
@@ -9,6 +12,7 @@ use wasmtime::{Engine, Linker, Module, Store};
 fn main() -> Result<()> {
     let avatar_state = Arc::new(Mutex::new(AvatarState::default()));
     let remote_avatars = Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let world_objects: Arc<Mutex<Vec<WorldObject>>> = Arc::new(Mutex::new(Vec::new()));
 
     let engine = Engine::default();
     let mut linker = Linker::new(&engine);
@@ -20,7 +24,8 @@ fn main() -> Result<()> {
     let instance = linker.instantiate(&mut store, &module)?;
     let game_tick = instance.get_typed_func::<(), ()>(&mut store, "game_tick")?;
 
-    let mut app = renderer::build_app(avatar_state.clone(), remote_avatars.clone());
+    let mut app =
+        renderer::build_app(avatar_state.clone(), remote_avatars.clone(), world_objects.clone());
     let store_handle = Arc::new(Mutex::new(store));
     app.insert_resource(renderer::WasmRuntime {
         store: store_handle.clone(),

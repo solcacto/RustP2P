@@ -31,6 +31,8 @@ mod imp {
         #[link(wasm_import_module = "env")]
         extern "C" {
             pub fn get_frame_count() -> u64;
+            pub fn get_delta_seconds() -> f64;
+            pub fn draw_box(x: f32, y: f32, z: f32, sx: f32, sy: f32, sz: f32, r: f32, g: f32, b: f32);
             pub fn get_input_move_up() -> u32;
             pub fn get_input_move_down() -> u32;
             pub fn get_input_move_left() -> u32;
@@ -60,6 +62,10 @@ mod imp {
     }
 
     pub fn frame_count() -> u64 { unsafe { raw::get_frame_count() } }
+    pub fn delta_seconds() -> f64 { unsafe { raw::get_delta_seconds() } }
+    pub fn draw_box(x: f32, y: f32, z: f32, sx: f32, sy: f32, sz: f32, r: f32, g: f32, b: f32) {
+        unsafe { raw::draw_box(x, y, z, sx, sy, sz, r, g, b) };
+    }
     pub fn input_move_up() -> bool { unsafe { raw::get_input_move_up() != 0 } }
     pub fn input_move_down() -> bool { unsafe { raw::get_input_move_down() != 0 } }
     pub fn input_move_left() -> bool { unsafe { raw::get_input_move_left() != 0 } }
@@ -171,6 +177,8 @@ mod imp {
     #[derive(Default)]
     pub struct MockState {
         pub frame_count: u64,
+        pub delta_seconds: f64,
+        pub draw_boxes: Vec<[f32; 9]>,
         pub move_up: bool,
         pub move_down: bool,
         pub move_left: bool,
@@ -205,6 +213,19 @@ mod imp {
     }
 
     pub fn frame_count() -> u64 { MOCK.lock().unwrap().frame_count }
+
+    pub fn delta_seconds() -> f64 {
+        let s = MOCK.lock().unwrap();
+        if s.delta_seconds == 0.0 {
+            1.0 / 60.0
+        } else {
+            s.delta_seconds
+        }
+    }
+
+    pub fn draw_box(x: f32, y: f32, z: f32, sx: f32, sy: f32, sz: f32, r: f32, g: f32, b: f32) {
+        MOCK.lock().unwrap().draw_boxes.push([x, y, z, sx, sy, sz, r, g, b]);
+    }
     pub fn input_move_up() -> bool { MOCK.lock().unwrap().move_up }
     pub fn input_move_down() -> bool { MOCK.lock().unwrap().move_down }
     pub fn input_move_left() -> bool { MOCK.lock().unwrap().move_left }

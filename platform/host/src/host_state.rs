@@ -4,7 +4,7 @@
 //! leak between guest modules or instances. Host functions read and mutate it
 //! through `Caller::data()` / `Caller::data_mut()`.
 
-use crate::avatar_state::{AvatarPose, AvatarState};
+use crate::avatar_state::{AvatarPose, AvatarState, WorldObject};
 use crate::chunk::{
     ChunkClaim, ChunkCoord, ChunkDht, ChunkEdit, ChunkState, ChunkStatePointer, ChunkStore,
     ZoneJoinRequest, ZoneState,
@@ -76,6 +76,8 @@ pub struct HostState {
     remote_avatars: Arc<Mutex<HashMap<String, AvatarPose>>>,
     /// Latest tag score of every remote peer, shared with the renderer.
     remote_scores: Arc<Mutex<HashMap<String, u32>>>,
+    /// Colored boxes the guest drew this frame, drained by the renderer.
+    world_objects: Arc<Mutex<Vec<WorldObject>>>,
     /// Local movement axis: 0 = X (role A), 1 = Z (role B).
     movement_axis: u8,
     /// Local tag score reported by the guest through `set_tag_score`.
@@ -144,6 +146,7 @@ impl HostState {
             avatar_state: None,
             remote_avatars: Arc::new(Mutex::new(HashMap::new())),
             remote_scores: Arc::new(Mutex::new(HashMap::new())),
+            world_objects: Arc::new(Mutex::new(Vec::new())),
             movement_axis: 0,
             tag_score: 0,
             wasm_error: None,
@@ -278,6 +281,17 @@ impl HostState {
     /// Returns the shared map of the latest pose of every remote peer.
     pub fn remote_avatars(&self) -> &Arc<Mutex<HashMap<String, AvatarPose>>> {
         &self.remote_avatars
+    }
+
+    /// Replaces the shared list of guest-drawn world objects (also handed to
+    /// the renderer so both sides observe the same data).
+    pub fn set_world_objects(&mut self, objects: Arc<Mutex<Vec<WorldObject>>>) {
+        self.world_objects = objects;
+    }
+
+    /// Returns the shared list of guest-drawn world objects.
+    pub fn world_objects(&self) -> &Arc<Mutex<Vec<WorldObject>>> {
+        &self.world_objects
     }
 
     /// Sets which movement axis this role uses (0 = X, 1 = Z).

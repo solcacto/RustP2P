@@ -9,7 +9,7 @@
 //! keyboard input is read by `read_keyboard` and written into the host's input
 //! buffer before the guest tick runs.
 
-use crate::avatar_state::{AvatarPose, AvatarState};
+use crate::avatar_state::{AvatarPose, AvatarState, WorldObject};
 use crate::host_state::{HostState, SignalingStatus};
 use crate::input_state::InputState;
 use crate::profiling::SharedFrameStats;
@@ -67,6 +67,18 @@ pub struct RemoteAvatarsHandle(
     /// Map of peer id to the peer's latest received pose.
     pub Arc<Mutex<HashMap<String, AvatarPose>>>,
 );
+
+/// Colored boxes the guest drew this frame, drained by `sync_world_objects`.
+#[derive(Resource, Clone)]
+pub struct WorldObjectsHandle(pub Arc<Mutex<Vec<WorldObject>>>);
+
+/// Shared unit cube mesh used for every guest-drawn box.
+#[derive(Resource, Clone)]
+pub struct WorldObjectMeshHandle(pub Handle<Mesh>);
+
+/// Marks a cube entity that mirrors one guest-drawn world object.
+#[derive(Component)]
+pub struct WorldObjectCube;
 
 /// The shared merged avatar mesh — every avatar renders with this single low-poly
 /// mesh so Bevy can batch them into a few draw calls.
@@ -212,6 +224,7 @@ pub struct WasmRuntime {
 pub fn build_app(
     avatar_state: Arc<Mutex<AvatarState>>,
     remote_avatars: Arc<Mutex<HashMap<String, AvatarPose>>>,
+    world_objects: Arc<Mutex<Vec<WorldObject>>>,
 ) -> App {
     let mut app = App::new();
     app.add_plugins((
@@ -260,6 +273,7 @@ pub fn build_app(
     });
     app.insert_resource(AvatarStateHandle(avatar_state));
     app.insert_resource(RemoteAvatarsHandle(remote_avatars));
+    app.insert_resource(WorldObjectsHandle(world_objects));
     app.insert_resource(AutoInput(false));
     app.insert_resource(CosmeticSlots::default());
     app.insert_resource(SharedFrameStats::default());
@@ -276,6 +290,8 @@ pub fn build_app(
             wasm_render_tick,
             sync_avatar_scene,
             apply_avatar_pose,
+            sync_world_objects,
+            follow_camera,
             update_chunk_claims,
             zone_transition,
             sync_remote_avatars,
@@ -722,6 +738,97 @@ fn apply_avatar_pose(
     }
 }
 
+/// Drains the boxes the guest drew this frame and mirrors them as cube
+/// entities, reusing existing cubes and spawning/despawning to match the
+/// guest's draw count.
+fn sync_world_objects(
+    mut commands: Commands,
+    objects: Res<WorldObjectsHandle>,
+    cube_mesh: Res<WorldObjectMeshHandle>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut cubes: Query<(Entity, &mut Transform, &mut Handle<StandardMaterial>), With<WorldObjectCube>>,
+    mut palette: Local<HashMap<(u8, u8, u8), Handle<StandardMaterial>>>,
+) {
+    let mut list = objects.0.lock().unwrap();
+    let mut slots = cubes.iter_mut().collect::<Vec<_>>();
+    // Despawn cubes that outnumber this frame's draw list.
+    if slots.len() > list.len() {
+        for (entity, _, _) in slots.drain(list.len()..) {
+            commands.entity(entity).despawn();
+        }
+    }
+    // Reuse existing cubes: reposition, resize, recolor.
+    for (object, (_, transform, material)) in list.iter().zip(slots.iter_mut()) {
+        let key = color_key(object);
+        let mat = palette
+            .entry(key)
+            .or_insert_with(|| make_cube_material(&mut materials, key));
+        **material = mat.clone();
+        transform.translation = Vec3::new(object.x, object.y, object.z);
+        transform.scale = Vec3::new(object.sx, object.sy, object.sz);
+    }
+    // Spawn fresh cubes for objects beyond the current count.
+    for object in list.iter().skip(slots.len()) {
+        let key = color_key(object);
+        let material = palette
+            .entry(key)
+            .or_insert_with(|| make_cube_material(&mut materials, key))
+            .clone();
+        commands.spawn((
+            MaterialMeshBundle {
+                mesh: cube_mesh.0.clone(),
+                material,
+                transform: Transform {
+                    translation: Vec3::new(object.x, object.y, object.z),
+                    scale: Vec3::new(object.sx, object.sy, object.sz),
+                    ..default()
+                },
+                ..default()
+            },
+            WorldObjectCube,
+        ));
+    }
+    list.clear();
+}
+
+/// Quantized RGB key for the material cache.
+fn color_key(object: &WorldObject) -> (u8, u8, u8) {
+    (
+        (object.r.clamp(0.0, 1.0) * 255.0) as u8,
+        (object.g.clamp(0.0, 1.0) * 255.0) as u8,
+        (object.b.clamp(0.0, 1.0) * 255.0) as u8,
+    )
+}
+
+/// Builds a material for a quantized color.
+fn make_cube_material(
+    materials: &mut Assets<StandardMaterial>,
+    key: (u8, u8, u8),
+) -> Handle<StandardMaterial> {
+    materials.add(StandardMaterial {
+        base_color: Color::srgb(
+            key.0 as f32 / 255.0,
+            key.1 as f32 / 255.0,
+            key.2 as f32 / 255.0,
+        ),
+        perceptual_roughness: 0.4,
+        ..default()
+    })
+}
+
+/// Smoothly tracks the avatar so it stays centered as the player moves.
+fn follow_camera(
+    avatar: Res<AvatarStateHandle>,
+    mut camera: Query<&mut Transform, (With<Camera3d>, Without<Avatar>)>,
+) {
+    let pose = *avatar.0.lock().unwrap();
+    for mut transform in &mut camera {
+        let target = Vec3::new(pose.x, 3.0, pose.z + 7.0);
+        transform.translation = transform.translation.lerp(target, 0.15);
+        transform.look_at(Vec3::new(pose.x, 0.8, pose.z), Vec3::Y);
+    }
+}
+
 /// Claims chunks for the local avatar: whenever the avatar crosses into a new
 /// chunk, this peer broadcasts "I am hosting chunks X,Y and X+1,Y" and records
 /// the ownership in the shared DHT.
@@ -1026,6 +1133,7 @@ fn setup_scene(
     commands.insert_resource(AvatarMeshHandle(avatar_mesh));
     commands.insert_resource(palette);
     commands.insert_resource(RemoteMaterialHandle(remote_material));
+    commands.insert_resource(WorldObjectMeshHandle(meshes.add(Cuboid::new(1.0, 1.0, 1.0))));
 
     commands.spawn((
         TextBundle::from_section(
