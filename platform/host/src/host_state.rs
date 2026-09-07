@@ -17,6 +17,16 @@ use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use wasmtime::ResourceLimiter;
+
+/// Maximum linear memory a guest may grow to (32 MiB).
+pub const MAX_WASM_MEMORY: usize = 32 * 1024 * 1024;
+/// Fuel budget per `game_tick` call — traps the guest if exceeded.
+pub const MAX_FUEL_PER_TICK: u64 = 5_000_000;
+/// Maximum inbound network message size (MTU-safe).
+pub const MAX_MESSAGE_SIZE: usize = 1200;
+/// Maximum queued inbound messages before oldest are dropped.
+pub const MAX_INCOMING_QUEUE: usize = 1000;
 
 /// Connectivity state of the signaling server link, surfaced in the HUD.
 ///
@@ -107,10 +117,14 @@ pub struct HostState {
     ipfs_api: String,
     /// Last pose sent by the guest, for delta compression of broadcasts.
     last_sent_pose: Option<AvatarState>,
-    /// The zone (chunk + its owner) the local player currently occupies.
+        /// The zone (chunk + its owner) the local player currently occupies.
     current_zone: Option<ZoneInfo>,
     /// The applied content of the current zone ("state stream").
     zone_content: Option<ChunkState>,
+    /// Ed25519 signing key for this peer (binds peer_id → pubkey). Not
+    /// serialized; generated per run via `generate_identity()` or loaded from
+    /// a persisted key.
+    signing_key: Option<ed25519_dalek::SigningKey>,
 }
 
 /// Which peer currently hosts the zone the local player occupies.
@@ -163,6 +177,7 @@ impl HostState {
             last_sent_pose: None,
             current_zone: None,
             zone_content: None,
+            signing_key: None,
         }
     }
 
@@ -689,5 +704,56 @@ impl HostState {
             z.chunk = zone.chunk;
             z.owner = zone.owner.clone();
         }
+    }
+
+    /// Generates a fresh ed25519 identity for this peer and binds `owner_pubkey`
+    /// to `peer_id`. Call once after `HostState::new` for authenticated sessions.
+    pub fn generate_identity(&mut self) {
+        use ed25519_dalek::Signer;
+        use rand::rngs::OsRng;
+        let mut csprng = OsRng;
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut csprng);
+        let verifying_key = signing_key.verifying_key();
+        self.owner_pubkey = format!("ed25519:{}", hex::encode(verifying_key.as_bytes()));
+        self.signing_key = Some(signing_key);
+    }
+
+    /// Signs `message` with this peer's identity key, if one exists.
+    pub fn sign_message(&self, message: &[u8]) -> Option<ed25519_dalek::Signature> {
+        use ed25519_dalek::Signer;
+        self.signing_key.as_ref().map(|k| k.sign(message))
+    }
+
+    /// Verifies `signature` over `message` against the peer's advertised
+    /// `owner_pubkey` (hex `ed25519:<64 hex>`). Returns false if the key is
+    /// missing or malformed.
+    pub fn verify_peer_message(&self, peer_pubkey: &str, message: &[u8], signature: &[u8; 64]) -> bool {
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+        let hex = peer_pubkey.strip_prefix("ed25519:").unwrap_or(peer_pubkey);
+        let Ok(bytes) = hex::decode(hex) else { return false };
+        let Ok(key_bytes): Result<[u8; 32], _> = bytes.try_into() else { return false };
+        let Ok(verifying_key) = VerifyingKey::from_bytes(&key_bytes) else { return false };
+        let signature = Signature::from_bytes(signature);
+        verifying_key.verify(message, &signature).is_ok()
+    }
+}
+
+impl ResourceLimiter for HostState {
+    fn memory_growing(
+        &mut self,
+        _current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> anyhow::Result<bool> {
+        Ok(desired <= MAX_WASM_MEMORY)
+    }
+
+    fn table_growing(
+        &mut self,
+        _current: usize,
+        _desired: usize,
+        _maximum: Option<usize>,
+    ) -> anyhow::Result<bool> {
+        Ok(true)
     }
 }

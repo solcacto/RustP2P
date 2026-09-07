@@ -22,7 +22,7 @@ use std::path::Path;
 /// Free-tier default: Google's public STUN server.
 pub const DEFAULT_STUN: &str = "stun:stun.l.google.com:19302";
 /// Public IPFS gateway used when the config doesn't specify one.
-pub const DEFAULT_IPFS_GATEWAY: &str = "https://cloudflare-ipfs.com";
+pub const DEFAULT_IPFS_GATEWAY: &str = "https://gateway.pinata.cloud";
 
 /// Root of `config.toml`.
 #[derive(Debug, Clone, Deserialize, PartialEq)]

@@ -7,7 +7,7 @@
 #   - Public IPFS gateway -> downloading game bundles by CID
 
 [network]
-# TODO: Replace this placeholder with the actual URL printed after running `npx wrangler deploy`
+# Deployed Cloudflare Worker URL (from `npx wrangler deploy` in cloudflare/)
 signaling_url = "wss://p2p-signal.solcacto-p2p.workers.dev"
 
 stun_servers = ["stun:stun.l.google.com:19302"]

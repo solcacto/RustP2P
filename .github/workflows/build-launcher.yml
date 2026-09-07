@@ -3,14 +3,37 @@ name: Build desktop launcher
 on:
   workflow_dispatch:
   push:
+    branches: [main, "experimental/*"]
     tags: ["v*"]
+  pull_request:
+    branches: [main]
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Build guest wasm
+        run: cargo build -p guest --target wasm32-unknown-unknown --release
+      - name: Run tests
+        run: cargo test --workspace
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
   macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Build guest wasm
+        run: cargo build -p guest --target wasm32-unknown-unknown --release
       - name: Build binaries
         run: cargo build --release -p host --bin play_game -p launcher --bin launcher
 
@@ -41,6 +64,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Build guest wasm
+        run: cargo build -p guest --target wasm32-unknown-unknown --release
       - name: Build binaries
         run: cargo build --release -p host --bin play_game -p launcher --bin launcher
 

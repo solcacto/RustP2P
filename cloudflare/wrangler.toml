@@ -1,8 +1,8 @@
 name = "p2p-signal"
 main = "src/index.ts"
 compatibility_date = "2024-09-23"
-# Free-tier Workers (workers.dev subdomain). Replace the placeholder in the
-# host's config.toml with the URL wrangler prints after `npx wrangler deploy`.
+# Free-tier Workers (workers.dev subdomain). URL is mirrored in
+# platform/host/config.toml as wss://p2p-signal.solcacto-p2p.workers.dev
 workers_dev = true
 
 # One Durable Object instance holds the signaling registry, so two game

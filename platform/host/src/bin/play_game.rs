@@ -272,11 +272,15 @@ fn main() -> Result<()> {
         }
     );
 
-    let engine = Engine::default();
+    let mut config = wasmtime::Config::new();
+    config.consume_fuel(true);
+    let engine = Engine::new(&config)?;
     let mut linker = Linker::new(&engine);
     host_functions::register(&mut linker)?;
     let module = Module::new(&engine, wasm_bytes)?;
     let mut store = Store::new(&engine, HostState::new(local_id.clone()));
+    store.set_fuel(host::host_state::MAX_FUEL_PER_TICK)?;
+    store.limiter(|state| state as &mut dyn wasmtime::ResourceLimiter);
     store
         .data_mut()
         .set_avatar_state(Some(avatar_state.clone()));

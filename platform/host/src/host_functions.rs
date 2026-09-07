@@ -172,6 +172,9 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<()> {
             if peer_id_ptr < 0 || peer_id_len < 0 || msg_ptr < 0 || msg_len < 0 {
                 return Ok(0);
             }
+            if msg_len as usize > crate::host_state::MAX_MESSAGE_SIZE {
+                return Ok(0);
+            }
             let mem = caller
                 .get_export("memory")
                 .and_then(|e| e.into_memory())
@@ -289,6 +292,9 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<()> {
          msg_ptr: i32,
          msg_len: i32| -> Result<i32> {
             if peer_id_ptr < 0 || peer_id_len < 0 || msg_ptr < 0 || msg_len < 0 {
+                return Ok(0);
+            }
+            if msg_len as usize > crate::host_state::MAX_MESSAGE_SIZE {
                 return Ok(0);
             }
             let mem = caller

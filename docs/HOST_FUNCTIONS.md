@@ -37,6 +37,11 @@ guest tick; games that manage their own loop may call it instead.
 Returns the number of frames rendered so far. The canonical timebase for game
 logic (e.g. the guest drives its animation from it).
 
+### `env::get_delta_seconds() -> f64`
+
+Returns the wall-clock delta of the most recent frame in seconds. Use for
+frame-rate-independent movement (`pos += speed * delta`).
+
 ---
 
 ## Demo counter
@@ -69,6 +74,14 @@ Each getter returns the current frame's input snapshot (see
 
 ---
 
+## Rendering
+
+### `env::draw_box(x: f32, y: f32, z: f32, sx: f32, sy: f32, sz: f32, r: f32, g: f32, b: f32)`
+
+Queues a colored box for the current frame (center `x,y,z`, size `sx,sy,sz`, color `r,g,b`). The renderer drains the list each frame and draws one cube mesh per entry. Non-finite values are dropped.
+
+---
+
 ## Networking
 
 ### `env::send_network_message(peer_id_ptr: i32, peer_id_len: i32, msg_ptr: i32, msg_len: i32) -> i32`
@@ -88,6 +101,18 @@ Pops the next inbound datagram (FIFO) and copies it into the guest's buffer.
   `buffer_ptr`/`buffer_len` is invalid or the message does not fit.
 - *Security:* the write is bounds-checked against the guest memory; a message
   that does not fit is rejected rather than truncated into host memory.
+
+### `env::send_reliable_message(peer_id_ptr: i32, peer_id_len: i32, msg_ptr: i32, msg_len: i32) -> i32`
+
+Queues `msg` for reliable delivery (acked + retried up to 3 times, 100 ms interval) to `peer_id`. Returns `1` on queued, `0` if the peer is unknown or the range is out of bounds. Oversized payloads (>1200 B) are rejected.
+
+### `env::receive_reliable_message(buffer_ptr: i32, buffer_len: i32) -> i32`
+
+Pops the next reliably-delivered message. Returns bytes written, `0` if none, `-1` if the buffer is invalid or too small.
+
+### `env::reliable_pending_count() -> i32`
+
+Returns the number of reliable messages still awaiting acknowledgement.
 
 ---
 
@@ -160,13 +185,41 @@ host asset folder (e.g. `"avatars/blue.glb"`).
 
 ---
 
+## Chunk / open-world
+
+### `env::broadcast_chunk_claim(origin_x: i32, origin_z: i32, extent_x: i32, extent_z: i32)`
+
+Claims a rectangular region of chunks (`extent` clamped to ≥1) for the local peer. The claim is recorded in the chunk DHT and broadcast to every peer.
+
+### `env::get_chunk_owner(chunk_x: i32, chunk_z: i32, out_peer_ptr: i32, out_peer_len: i32) -> i32`
+
+Writes the owning peer id of `chunk` into the guest buffer. Returns `1` if the chunk has a known owner, `0` otherwise.
+
+### `env::save_chunk_state(edit_x: f32, edit_z: f32, kind_ptr: i32, kind_len: i32, value: f32) -> i32`
+
+Records a chunk edit (e.g. placed block) for the chunk containing `edit_x,z`. Returns `1` on success.
+
+### `env::publish_chunk_states() -> i32`
+
+Publishes all locally-saved chunk states to IPFS and broadcasts state pointers. Returns the number of states published.
+
+### `env::load_remote_chunk_state(chunk_x: i32, chunk_z: i32, out_buf: i32, out_len: i32) -> i32`
+
+Loads a remote chunk's persisted state (if cached from IPFS) as JSON into the guest buffer. Returns `1` if the state exists.
+
+---
+
 ## Wire formats (datagrams)
 
 | Type | Length | Layout |
 |------|--------|--------|
 | Pose | 16 B   | `f32 x`, `f32 y`, `f32 z`, `f32 rot_y`, all little-endian |
+| Pose (delta) | 8 B | `i16 dx, dy, dz, drot` mm deltas from previous pose |
 | Score | 4 B   | `u32` little-endian |
+| Batch | variable | `[0x11][count u8][seq u32] + count×[len u8][payload]` |
+| Reliable | variable | `[0x12][seq u32][payload]` |
+| Ack | 5 B | `[0x13][seq u32]` |
+| Chunk claim | variable | `[0x01][JSON ChunkClaim]` |
+| Chunk pointer | variable | `[0x02][JSON ChunkStatePointer]` |
 
-The host's receive path dispatches purely on length: 16-byte datagrams are
-validated and stored as remote poses; 4-byte datagrams are stored as remote
-scores; anything else is dropped.
+The host's receive path dispatches on tags/length: 16/8-byte payloads are poses (delta or full), 4-byte are scores, `0x11` batches are split, `0x12`/`0x13` reliable/ack, `0x01`/`0x02` chunk traffic; anything else is dropped. Payloads >1200 B are rejected and guests are fuel-limited (5 M fuel/tick) and memory-limited (32 MiB).

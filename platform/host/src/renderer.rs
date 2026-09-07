@@ -406,6 +406,8 @@ fn wasm_render_tick(runtime: Res<WasmRuntime>, stats: Res<SharedFrameStats>) {
         if store.data().wasm_error().is_some() {
             None
         } else {
+            // Replenish fuel each tick so a guest cannot starve the host.
+            let _ = store.set_fuel(crate::host_state::MAX_FUEL_PER_TICK);
             let frame = store.data().frame_count();
             let wasm_start = std::time::Instant::now();
             let result = runtime.render_tick.call(store, ());

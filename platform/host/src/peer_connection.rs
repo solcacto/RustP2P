@@ -528,6 +528,9 @@ impl PeerConnection {
         let mut buf = [0u8; 65536];
         while let Ok((len, addr)) = self.udp.recv_from(&mut buf) {
             self.count_received(len, &buf[..len]);
+            if len > 4096 {
+                continue;
+            }
             let payload = &buf[..len];
             match payload.first() {
                 Some(&PING_TAG) if len >= 17 => {

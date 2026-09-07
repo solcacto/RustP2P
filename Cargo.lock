@@ -2529,6 +2529,7 @@ checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
 dependencies = [
  "curve25519-dalek",
  "ed25519",
+ "rand_core 0.6.4",
  "serde",
  "sha2",
  "subtle",
@@ -3584,6 +3585,7 @@ dependencies = [
  "gltf",
  "hex",
  "image",
+ "rand 0.8.7",
  "registry_server",
  "serde",
  "serde_json",
