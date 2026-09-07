@@ -125,6 +125,8 @@ pub struct HostState {
     /// serialized; generated per run via `generate_identity()` or loaded from
     /// a persisted key.
     signing_key: Option<ed25519_dalek::SigningKey>,
+    /// Verified pubkeys of remote peers: peer_id → 32-byte pubkey.
+    peer_pubkeys: HashMap<String, [u8; 32]>,
 }
 
 /// Which peer currently hosts the zone the local player occupies.
@@ -178,6 +180,7 @@ impl HostState {
             current_zone: None,
             zone_content: None,
             signing_key: None,
+            peer_pubkeys: HashMap::new(),
         }
     }
 
@@ -735,6 +738,33 @@ impl HostState {
         let Ok(verifying_key) = VerifyingKey::from_bytes(&key_bytes) else { return false };
         let signature = Signature::from_bytes(signature);
         verifying_key.verify(message, &signature).is_ok()
+    }
+
+    /// Returns the local pubkey bytes, if an identity has been generated.
+    pub fn local_pubkey_bytes(&self) -> Option<[u8; 32]> {
+        self.signing_key.as_ref().map(|k| k.verifying_key().to_bytes())
+    }
+
+    /// Records the pubkey for `peer_id`, rejecting mismatched rotations.
+    /// Returns true if the key was accepted (new or matching).
+    pub fn record_peer_pubkey(&mut self, peer_id: &str, pubkey: [u8; 32]) -> bool {
+        match self.peer_pubkeys.get(peer_id) {
+            Some(existing) if existing != &pubkey => {
+                eprintln!("[identity] peer '{}' pubkey mismatch — rejecting impostor", peer_id);
+                false
+            }
+            Some(_) => true,
+            None => {
+                self.peer_pubkeys.insert(peer_id.to_string(), pubkey);
+                self.owner_pubkey = format!("ed25519:{}", hex::encode(pubkey));
+                true
+            }
+        }
+    }
+
+    /// Returns the recorded pubkey for `peer_id`, if known.
+    pub fn peer_pubkey(&self, peer_id: &str) -> Option<[u8; 32]> {
+        self.peer_pubkeys.get(peer_id).copied()
     }
 }
 

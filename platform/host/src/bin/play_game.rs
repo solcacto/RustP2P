@@ -281,6 +281,13 @@ fn main() -> Result<()> {
     let mut store = Store::new(&engine, HostState::new(local_id.clone()));
     store.set_fuel(host::host_state::MAX_FUEL_PER_TICK)?;
     store.limiter(|state| state as &mut dyn wasmtime::ResourceLimiter);
+    // Bind peer_id → ed25519 identity so poses/scores can be authenticated.
+    store.data_mut().generate_identity();
+    println!(
+        "[identity] {} → {}",
+        store.data().peer_id(),
+        store.data().owner_pubkey()
+    );
     store
         .data_mut()
         .set_avatar_state(Some(avatar_state.clone()));

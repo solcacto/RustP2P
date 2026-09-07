@@ -739,6 +739,53 @@ pub fn poll_network(store: &mut wasmtime::Store<HostState>) {
     let chunk_registry = store.data().chunk_registry().clone();
     let mut chunks = chunk_registry.lock().unwrap();
     for (addr, payload) in incoming {
+        // Signed pose: verify ed25519 signature before accepting.
+        if payload.first() == Some(&crate::net::SIGNED_POSE_TAG) {
+            let Some(peer_id) = peer_id_for(store, addr) else { continue };
+            let Some((inner, pubkey, sig)) = crate::net::parse_signed_pose(&payload) else { continue };
+            // Enforce peer_id ↔ pubkey binding (first-seen pubkey is authoritative).
+            {
+                let mut state = store.data_mut();
+                if !state.record_peer_pubkey(&peer_id, *pubkey) {
+                    continue;
+                }
+            }
+            // Verify signature over the inner pose bytes.
+            {
+                use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+                let Ok(vk) = VerifyingKey::from_bytes(pubkey) else { continue };
+                let sig = Signature::from_bytes(sig);
+                if vk.verify(inner, &sig).is_err() {
+                    eprintln!("[identity] invalid signed pose from '{}' — dropping", peer_id);
+                    continue;
+                }
+            }
+            let pose = crate::net::decode_pose(map.get(&peer_id), inner);
+            let Some(pose) = pose else { continue };
+            map.insert(peer_id, pose);
+            continue;
+        }
+        if payload.first() == Some(&crate::net::SIGNED_SCORE_TAG) {
+            let Some(peer_id) = peer_id_for(store, addr) else { continue };
+            let Some((score, pubkey, sig)) = crate::net::parse_signed_score(&payload) else { continue };
+            {
+                let mut state = store.data_mut();
+                if !state.record_peer_pubkey(&peer_id, *pubkey) {
+                    continue;
+                }
+            }
+            {
+                use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+                let Ok(vk) = VerifyingKey::from_bytes(pubkey) else { continue };
+                let sig = Signature::from_bytes(sig);
+                if vk.verify(&score.to_le_bytes(), &sig).is_err() {
+                    eprintln!("[identity] invalid signed score from '{}' — dropping", peer_id);
+                    continue;
+                }
+            }
+            scores.insert(peer_id, score);
+            continue;
+        }
         match payload.len() {
             16 | 8 => {
                 let Some(peer_id) = peer_id_for(store, addr) else {

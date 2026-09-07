@@ -263,8 +263,19 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<()> {
             // Delta-compress against the previous broadcast (8-byte delta vs
             // 16-byte full pose) and send through the batching layer.
             let payload = crate::net::encode_pose(caller.data().last_sent_pose(), &pose);
+            // Sign the pose payload if this peer has an identity; fall back to
+            // unsigned for backward compatibility (e.g. tests without identity).
+            let to_send = if let Some(pubkey) = caller.data().local_pubkey_bytes() {
+                if let Some(sig) = caller.data().sign_message(&payload) {
+                    crate::net::build_signed_pose(&payload, &pubkey, &sig.to_bytes())
+                } else {
+                    payload
+                }
+            } else {
+                payload
+            };
             if let Some(pc) = caller.data().peer_connection() {
-                pc.batch_send_to_all(&payload);
+                pc.batch_send_to_all(&to_send);
             }
             caller.data_mut().set_last_sent_pose(pose);
             host_fn_time("broadcast_avatar_pose", start.elapsed());
@@ -277,7 +288,17 @@ pub fn register(linker: &mut Linker<HostState>) -> Result<()> {
         "broadcast_tag_score",
         |caller: Caller<'_, HostState>, score: u32| -> Result<()> {
             if let Some(pc) = caller.data().peer_connection() {
-                pc.batch_send_to_all(&score.to_le_bytes());
+                let score_bytes = score.to_le_bytes();
+                let to_send = if let Some(pubkey) = caller.data().local_pubkey_bytes() {
+                    if let Some(sig) = caller.data().sign_message(&score_bytes) {
+                        crate::net::build_signed_score(score, &pubkey, &sig.to_bytes())
+                    } else {
+                        score_bytes.to_vec()
+                    }
+                } else {
+                    score_bytes.to_vec()
+                };
+                pc.batch_send_to_all(&to_send);
             }
             Ok(())
         },

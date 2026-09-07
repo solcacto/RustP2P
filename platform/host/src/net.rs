@@ -17,6 +17,10 @@ pub const BATCH_TAG: u8 = 0x11;
 pub const RELIABLE_TAG: u8 = 0x12;
 /// Tag marking an acknowledgement (`u32 seq`).
 pub const ACK_TAG: u8 = 0x13;
+/// Tag marking a signed pose (payload + 32B pubkey + 64B signature).
+pub const SIGNED_POSE_TAG: u8 = 0x20;
+/// Tag marking a signed score (4B score + 32B pubkey + 64B signature).
+pub const SIGNED_SCORE_TAG: u8 = 0x21;
 
 /// Full pose payload length (four little-endian f32s).
 pub const POSE_FULL_LEN: usize = 16;
@@ -166,6 +170,53 @@ pub fn reliable_payload(payload: &[u8]) -> Option<&[u8]> {
     } else {
         None
     }
+}
+
+/// Builds a signed pose envelope: `[SIGNED_POSE_TAG][pose_len u8][pose][pubkey 32][sig 64]`.
+pub fn build_signed_pose(pose_payload: &[u8], pubkey: &[u8; 32], sig: &[u8; 64]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + 1 + pose_payload.len() + 32 + 64);
+    out.push(SIGNED_POSE_TAG);
+    out.push(pose_payload.len() as u8);
+    out.extend_from_slice(pose_payload);
+    out.extend_from_slice(pubkey);
+    out.extend_from_slice(sig);
+    out
+}
+
+/// Parses a signed pose envelope.
+pub fn parse_signed_pose(payload: &[u8]) -> Option<(&[u8], &[u8; 32], &[u8; 64])> {
+    if payload.first() != Some(&SIGNED_POSE_TAG) {
+        return None;
+    }
+    let pose_len = *payload.get(1)? as usize;
+    if payload.len() != 1 + 1 + pose_len + 32 + 64 {
+        return None;
+    }
+    let pose = &payload[2..2 + pose_len];
+    let pubkey: &[u8; 32] = payload[2 + pose_len..2 + pose_len + 32].try_into().ok()?;
+    let sig: &[u8; 64] = payload[2 + pose_len + 32..].try_into().ok()?;
+    Some((pose, pubkey, sig))
+}
+
+/// Builds a signed score envelope: `[SIGNED_SCORE_TAG][score 4][pubkey 32][sig 64]`.
+pub fn build_signed_score(score: u32, pubkey: &[u8; 32], sig: &[u8; 64]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + 4 + 32 + 64);
+    out.push(SIGNED_SCORE_TAG);
+    out.extend_from_slice(&score.to_le_bytes());
+    out.extend_from_slice(pubkey);
+    out.extend_from_slice(sig);
+    out
+}
+
+/// Parses a signed score envelope.
+pub fn parse_signed_score(payload: &[u8]) -> Option<(u32, &[u8; 32], &[u8; 64])> {
+    if payload.first() != Some(&SIGNED_SCORE_TAG) || payload.len() != 1 + 4 + 32 + 64 {
+        return None;
+    }
+    let score = u32::from_le_bytes(payload[1..5].try_into().ok()?);
+    let pubkey: &[u8; 32] = payload[5..37].try_into().ok()?;
+    let sig: &[u8; 64] = payload[37..].try_into().ok()?;
+    Some((score, pubkey, sig))
 }
 
 /// A message awaiting acknowledgement, with retry bookkeeping.
