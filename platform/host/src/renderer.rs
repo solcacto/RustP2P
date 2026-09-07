@@ -20,8 +20,9 @@ use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::core_pipeline::CorePipelinePlugin;
 use bevy::diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin};
 use bevy::gltf::GltfAssetLabel;
-use bevy::input::keyboard::{KeyCode, KeyboardInput};
-use bevy::input::ButtonState;
+use bevy::input::keyboard::KeyCode;
+use bevy::input::mouse::{MouseButton, MouseMotion, MouseWheel};
+use bevy::input::ButtonInput;
 use bevy::log::LogPlugin;
 use bevy::pbr::{
     DirectionalLight, DirectionalLightBundle, DirectionalLightShadowMap, NotShadowCaster,
@@ -122,6 +123,29 @@ pub struct AvatarPlayer;
 /// Marks the child `SceneBundle` holding an avatar's rigged model.
 #[derive(Component)]
 pub struct AvatarScene;
+
+/// Orbit camera state — yaw/pitch/distance around the local avatar.
+/// Right-click drag orbits, scroll wheel zooms.
+#[derive(Resource)]
+pub struct CameraOrbit {
+    pub yaw: f32,
+    pub pitch: f32,
+    pub distance: f32,
+    pub sensitivity: f32,
+    pub pivot_height: f32,
+}
+
+impl Default for CameraOrbit {
+    fn default() -> Self {
+        Self {
+            yaw: 0.0,
+            pitch: 0.30,
+            distance: 7.0,
+            sensitivity: 0.005,
+            pivot_height: 0.8,
+        }
+    }
+}
 
 /// A rigged avatar model: its glTF scene and a graph over its animation clips,
 /// plus the local-space scale/lift that puts the model's feet on the ground
@@ -340,6 +364,7 @@ pub fn build_app(
     app.insert_resource(AutoInput(false));
     app.insert_resource(CosmeticSlots::default());
     app.insert_resource(SharedFrameStats::default());
+    app.insert_resource(CameraOrbit::default());
     app.add_plugins((
         FrameTimeDiagnosticsPlugin,
         LogDiagnosticsPlugin::default(),
@@ -350,6 +375,7 @@ pub fn build_app(
         Update,
         (
             read_keyboard,
+            orbit_camera_control,
             wasm_render_tick,
             build_avatar_models,
             sync_avatar_scene,
@@ -538,7 +564,7 @@ fn backoff(base_ms: u64, max_ms: u64, attempt: u32) -> Duration {
 /// buffer (which the guest reads through the `get_input_*` host functions).
 /// In auto mode, a scripted input drives role A toward role B instead.
 fn read_keyboard(
-    mut events: EventReader<KeyboardInput>,
+    keys: Res<ButtonInput<KeyCode>>,
     runtime: Res<WasmRuntime>,
     auto: Res<AutoInput>,
     stats: Res<SharedFrameStats>,
@@ -552,19 +578,23 @@ fn read_keyboard(
             input.move_left = 1;
         }
     } else {
-        for event in events.read() {
-            if event.state != ButtonState::Pressed {
-                continue;
-            }
-            match event.key_code {
-                KeyCode::KeyW => input.move_up = 1,
-                KeyCode::KeyS => input.move_down = 1,
-                KeyCode::KeyA => input.move_left = 1,
-                KeyCode::KeyD => input.move_right = 1,
-                KeyCode::Space => input.action_1 = 1,
-                KeyCode::ShiftLeft => input.action_2 = 1,
-                _ => {}
-            }
+        if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
+            input.move_up = 1;
+        }
+        if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
+            input.move_down = 1;
+        }
+        if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
+            input.move_left = 1;
+        }
+        if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
+            input.move_right = 1;
+        }
+        if keys.pressed(KeyCode::Space) {
+            input.action_1 = 1;
+        }
+        if keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight) {
+            input.action_2 = 1;
         }
     }
     let mut store = runtime.store.lock().unwrap();
@@ -574,6 +604,27 @@ fn read_keyboard(
         .lock()
         .unwrap()
         .add_input(start.elapsed().as_secs_f64() * 1000.0);
+}
+
+/// Right-click drag orbits the camera around the local avatar; scroll wheel zooms.
+fn orbit_camera_control(
+    mut orbit: ResMut<CameraOrbit>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut motion: EventReader<MouseMotion>,
+    mut wheel: EventReader<MouseWheel>,
+) {
+    if mouse.pressed(MouseButton::Right) {
+        for ev in motion.read() {
+            orbit.yaw -= ev.delta.x * orbit.sensitivity;
+            orbit.pitch = (orbit.pitch - ev.delta.y * orbit.sensitivity).clamp(-0.4, 1.2);
+        }
+    } else {
+        // Drain motion events when not dragging so they don't accumulate.
+        motion.clear();
+    }
+    for ev in wheel.read() {
+        orbit.distance = (orbit.distance - ev.y * 0.5).clamp(3.0, 20.0);
+    }
 }
 
 /// Periodically pings every known peer to measure round-trip time, and records
@@ -932,15 +983,23 @@ fn make_cube_material(
 }
 
 /// Smoothly tracks the avatar so it stays centered as the player moves.
+/// Uses `CameraOrbit` yaw/pitch/distance for right-click drag orbit.
 fn follow_camera(
     avatar: Res<AvatarStateHandle>,
+    orbit: Res<CameraOrbit>,
     mut camera: Query<&mut Transform, (With<Camera3d>, Without<Avatar>)>,
 ) {
     let pose = *avatar.0.lock().unwrap();
+    let pivot = Vec3::new(pose.x, orbit.pivot_height, pose.z);
+    let offset = Vec3::new(
+        orbit.distance * orbit.yaw.sin() * orbit.pitch.cos(),
+        orbit.distance * orbit.pitch.sin(),
+        orbit.distance * orbit.yaw.cos() * orbit.pitch.cos(),
+    );
+    let target = pivot + offset;
     for mut transform in &mut camera {
-        let target = Vec3::new(pose.x, 3.0, pose.z + 7.0);
         transform.translation = transform.translation.lerp(target, 0.15);
-        transform.look_at(Vec3::new(pose.x, 0.8, pose.z), Vec3::Y);
+        transform.look_at(pivot, Vec3::Y);
     }
 }
 
@@ -1322,20 +1381,23 @@ fn animate_avatars(
         let pos = transform.translation;
         let disp = pos - anim.last_pos;
         let instant = (disp.length() / dt).min(20.0);
-        anim.speed += (instant - anim.speed) * 0.3;
+        anim.speed += (instant - anim.speed) * 0.4;
         anim.last_pos = pos;
 
-        if anim.speed > 0.15 {
+        if anim.speed > 0.1 {
             // Face the horizontal direction of travel (local +Z = forward).
-            let yaw = disp.x.atan2(disp.z);
-            transform.rotation = Quat::from_rotation_y(yaw);
+            // Use normalized disp so diagonal movement faces correctly.
+            if disp.length_squared() > 1e-6 {
+                let yaw = disp.x.atan2(disp.z);
+                transform.rotation = Quat::from_rotation_y(yaw);
+            }
         }
 
         let Ok((_, mut player)) = players.get_mut(anim.player) else {
             continue;
         };
         let model = models.model(anim.kind);
-        let moving = anim.speed > 0.15;
+        let moving = anim.speed > 0.1;
         let Some(clip) = player.animation_mut(model.walk) else {
             continue;
         };
