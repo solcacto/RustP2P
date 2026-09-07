@@ -105,10 +105,11 @@ impl LauncherApp {
                 ),
             };
             println!("[launcher] {line}");
+            let log_path = std::env::temp_dir().join("launcher_fetch.log");
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open("/tmp/launcher_fetch.log")
+                .open(&log_path)
             {
                 use std::io::Write;
                 let _ = writeln!(f, "{line}");
@@ -223,10 +224,11 @@ impl eframe::App for LauncherApp {
                 r.height() as i32
             );
             println!("[launcher] {line}");
+            let log_path = std::env::temp_dir().join("launcher_fetch.log");
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open("/tmp/launcher_fetch.log")
+                .open(&log_path)
             {
                 use std::io::Write;
                 let _ = writeln!(f, "{line}");
