@@ -92,6 +92,8 @@ pub struct AvatarAnim {
     pub speed: f32,
     /// Last frame's translation, used to detect movement.
     pub last_pos: Vec3,
+    /// Last movement yaw (radians), preserved when idle so facing doesn't snap.
+    pub last_yaw: f32,
 }
 
 /// Which rigged avatar model a game has selected. Games pick one by avatar
@@ -562,9 +564,11 @@ fn backoff(base_ms: u64, max_ms: u64, attempt: u32) -> Duration {
 
 /// Polls real keyboard input each frame and writes it into the host's input
 /// buffer (which the guest reads through the `get_input_*` host functions).
-/// In auto mode, a scripted input drives role A toward role B instead.
+/// WASD is camera-relative (rotated by orbit yaw) so W always moves toward the
+/// camera's forward. In auto mode, a scripted input drives role A toward role B.
 fn read_keyboard(
     keys: Res<ButtonInput<KeyCode>>,
+    orbit: Res<CameraOrbit>,
     runtime: Res<WasmRuntime>,
     auto: Res<AutoInput>,
     stats: Res<SharedFrameStats>,
@@ -578,17 +582,51 @@ fn read_keyboard(
             input.move_left = 1;
         }
     } else {
+        // Raw world-space intent (W=-Z, S=+Z, A=-X, D=+X)
+        let mut raw_x: f32 = 0.0;
+        let mut raw_z: f32 = 0.0;
         if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
-            input.move_up = 1;
+            raw_z -= 1.0;
         }
         if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
-            input.move_down = 1;
+            raw_z += 1.0;
         }
         if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
-            input.move_left = 1;
+            raw_x -= 1.0;
         }
         if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
-            input.move_right = 1;
+            raw_x += 1.0;
+        }
+        // Rotate by camera yaw so movement is camera-relative.
+        if raw_x != 0.0 || raw_z != 0.0 {
+            let cos = orbit.yaw.cos();
+            let sin = orbit.yaw.sin();
+            let rot_x = raw_x * cos + raw_z * sin;
+            let rot_z = -raw_x * sin + raw_z * cos;
+            if rot_x > 0.3 {
+                input.move_right = 1;
+            } else if rot_x < -0.3 {
+                input.move_left = 1;
+            }
+            if rot_z > 0.3 {
+                input.move_down = 1;
+            } else if rot_z < -0.3 {
+                input.move_up = 1;
+            }
+            // Preserve diagonal intent when both components are significant
+            // (e.g. W+D at 45° yaw should still move diagonally).
+            if rot_x.abs() > 0.3 && rot_z.abs() > 0.3 {
+                if rot_x > 0.0 {
+                    input.move_right = 1;
+                } else {
+                    input.move_left = 1;
+                }
+                if rot_z > 0.0 {
+                    input.move_down = 1;
+                } else {
+                    input.move_up = 1;
+                }
+            }
         }
         if keys.pressed(KeyCode::Space) {
             input.action_1 = 1;
@@ -616,7 +654,7 @@ fn orbit_camera_control(
     if mouse.pressed(MouseButton::Right) {
         for ev in motion.read() {
             orbit.yaw -= ev.delta.x * orbit.sensitivity;
-            orbit.pitch = (orbit.pitch - ev.delta.y * orbit.sensitivity).clamp(-0.4, 1.2);
+            orbit.pitch = (orbit.pitch + ev.delta.y * orbit.sensitivity).clamp(-0.4, 1.2);
         }
     } else {
         // Drain motion events when not dragging so they don't accumulate.
@@ -796,7 +834,7 @@ pub fn poll_network(store: &mut wasmtime::Store<HostState>) {
             let Some((inner, pubkey, sig)) = crate::net::parse_signed_pose(&payload) else { continue };
             // Enforce peer_id ↔ pubkey binding (first-seen pubkey is authoritative).
             {
-                let mut state = store.data_mut();
+                let state = store.data_mut();
                 if !state.record_peer_pubkey(&peer_id, *pubkey) {
                     continue;
                 }
@@ -820,7 +858,7 @@ pub fn poll_network(store: &mut wasmtime::Store<HostState>) {
             let Some(peer_id) = peer_id_for(store, addr) else { continue };
             let Some((score, pubkey, sig)) = crate::net::parse_signed_score(&payload) else { continue };
             {
-                let mut state = store.data_mut();
+                let state = store.data_mut();
                 if !state.record_peer_pubkey(&peer_id, *pubkey) {
                     continue;
                 }
@@ -1154,6 +1192,7 @@ fn spawn_avatar(commands: &mut Commands, models: &AvatarModels, path: String) {
                 player: Entity::PLACEHOLDER,
                 speed: 0.0,
                 last_pos: Vec3::ZERO,
+                last_yaw: 0.0,
             },
         ))
         .id();
@@ -1292,6 +1331,7 @@ fn sync_remote_avatars(
                             player: Entity::PLACEHOLDER,
                             speed: 0.0,
                             last_pos: Vec3::new(pose.x, pose.y, pose.z),
+                            last_yaw: pose.rot_y,
                         },
                     ))
                     .id();
@@ -1386,11 +1426,16 @@ fn animate_avatars(
 
         if anim.speed > 0.1 {
             // Face the horizontal direction of travel (local +Z = forward).
-            // Use normalized disp so diagonal movement faces correctly.
             if disp.length_squared() > 1e-6 {
                 let yaw = disp.x.atan2(disp.z);
+                anim.last_yaw = yaw;
                 transform.rotation = Quat::from_rotation_y(yaw);
+            } else {
+                transform.rotation = Quat::from_rotation_y(anim.last_yaw);
             }
+        } else {
+            // Preserve facing direction when idle — don't snap back to 0.
+            transform.rotation = Quat::from_rotation_y(anim.last_yaw);
         }
 
         let Ok((_, mut player)) = players.get_mut(anim.player) else {

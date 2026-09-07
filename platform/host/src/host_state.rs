@@ -712,7 +712,6 @@ impl HostState {
     /// Generates a fresh ed25519 identity for this peer and binds `owner_pubkey`
     /// to `peer_id`. Call once after `HostState::new` for authenticated sessions.
     pub fn generate_identity(&mut self) {
-        use ed25519_dalek::Signer;
         use rand::rngs::OsRng;
         let mut csprng = OsRng;
         let signing_key = ed25519_dalek::SigningKey::generate(&mut csprng);
