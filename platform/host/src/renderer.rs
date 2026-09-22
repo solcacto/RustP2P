@@ -126,6 +126,18 @@ pub struct AvatarPlayer;
 #[derive(Component)]
 pub struct AvatarScene;
 
+/// Shared Roblox-R16-style head shell mesh (one per app).
+#[derive(Resource)]
+pub struct RobloxHeadMesh(pub Handle<Mesh>);
+
+/// Classic Roblox yellow head material.
+#[derive(Resource)]
+pub struct RobloxHeadMaterial(pub Handle<StandardMaterial>);
+
+/// Marks the blocky shell covering an avatar's baked head.
+#[derive(Component)]
+pub struct RobloxHead;
+
 /// Orbit camera state — yaw/pitch/distance around the local avatar.
 /// Right-click drag orbits, scroll wheel zooms.
 #[derive(Resource)]
@@ -1000,6 +1012,85 @@ fn sync_world_objects(
     list.clear();
 }
 
+/// Builds a Roblox-R16-style head: a short vertical cylinder with rounded
+/// top/bottom edges, generated as a surface of revolution around +Y.
+///
+/// Sized (radius 0.22, height ~0.42 in avatar-root units) to swallow the baked
+/// CesiumMan head at the Head attachment point. Returns position, normal, uv
+/// triples plus a triangle index list with outward-facing winding.
+fn roblox_head_mesh() -> Mesh {
+    use bevy::render::mesh::{Indices, PrimitiveTopology};
+    use std::f32::consts::{FRAC_PI_2, PI};
+
+    const RADIUS: f32 = 0.22;
+    const HALF_H: f32 = 0.15;
+    const CORNER: f32 = 0.06;
+    const SEGMENTS: usize = 28;
+    const ARC_STEPS: usize = 6;
+
+    // 2D profile as (r, y, nr, ny): bottom-center -> bottom edge -> rounded
+    // corner -> straight side -> rounded corner -> top-center.
+    let mut profile: Vec<(f32, f32, f32, f32)> = Vec::new();
+    profile.push((0.0, -HALF_H, 0.0, -1.0));
+    profile.push((RADIUS - CORNER, -HALF_H, 0.0, -1.0));
+    for i in 1..=ARC_STEPS {
+        let a = -FRAC_PI_2 + (i as f32 / ARC_STEPS as f32) * FRAC_PI_2;
+        profile.push((
+            RADIUS - CORNER + a.cos() * CORNER,
+            -HALF_H + CORNER + a.sin() * CORNER,
+            a.cos(),
+            a.sin(),
+        ));
+    }
+    profile.push((RADIUS, HALF_H - CORNER, 1.0, 0.0));
+    for i in 1..=ARC_STEPS {
+        let a = (i as f32 / ARC_STEPS as f32) * FRAC_PI_2;
+        profile.push((
+            RADIUS - CORNER + a.cos() * CORNER,
+            HALF_H - CORNER + a.sin() * CORNER,
+            a.cos(),
+            a.sin(),
+        ));
+    }
+    profile.push((RADIUS - CORNER, HALF_H, 0.0, 1.0));
+    profile.push((0.0, HALF_H, 0.0, 1.0));
+
+    let rows = profile.len();
+    let mut positions = Vec::with_capacity(rows * SEGMENTS * 3);
+    let mut normals = Vec::with_capacity(rows * SEGMENTS * 3);
+    let mut uvs = Vec::with_capacity(rows * SEGMENTS * 2);
+    for (ri, (r, y, nr, ny)) in profile.iter().enumerate() {
+        for s in 0..SEGMENTS {
+            let theta = (s as f32 / SEGMENTS as f32) * 2.0 * PI;
+            let (sin, cos) = theta.sin_cos();
+            positions.push([r * cos, *y, r * sin]);
+            normals.push([nr * cos, *ny, nr * sin]);
+            uvs.push([s as f32 / SEGMENTS as f32, ri as f32 / (rows - 1) as f32]);
+        }
+    }
+    let mut indices = Vec::with_capacity((rows - 1) * SEGMENTS * 6);
+    for i in 0..rows - 1 {
+        for s in 0..SEGMENTS {
+            let s1 = (s + 1) % SEGMENTS;
+            let a = (i * SEGMENTS + s) as u32;
+            let b = ((i + 1) * SEGMENTS + s) as u32;
+            let c = ((i + 1) * SEGMENTS + s1) as u32;
+            let d = (i * SEGMENTS + s1) as u32;
+            indices.extend_from_slice(&[a, b, c, a, c, d]);
+        }
+    }
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        bevy::render::render_asset::RenderAssetUsages::default(),
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
 /// Quantized RGB key for the material cache.
 fn color_key(object: &WorldObject) -> (u8, u8, u8) {
     (
@@ -1152,6 +1243,8 @@ fn sync_avatar_scene(
     runtime: Res<WasmRuntime>,
     mut commands: Commands,
     models: Option<Res<AvatarModels>>,
+    head_mesh: Option<Res<RobloxHeadMesh>>,
+    head_material: Option<Res<RobloxHeadMaterial>>,
     avatars: Query<(Entity, &AvatarSource), With<Avatar>>,
 ) {
     let desired = runtime
@@ -1161,6 +1254,10 @@ fn sync_avatar_scene(
         .data()
         .avatar_path()
         .to_string();
+    let head = head_mesh
+        .as_ref()
+        .zip(head_material.as_ref())
+        .map(|(m, mat)| (m.0.clone(), mat.0.clone()));
     match avatars.iter().next() {
         Some((entity, source)) if source.0 == desired => {
             let _ = entity;
@@ -1168,12 +1265,12 @@ fn sync_avatar_scene(
         Some((entity, _)) => {
             commands.entity(entity).despawn();
             if let Some(models) = models.as_ref() {
-                spawn_avatar(&mut commands, models, desired);
+                spawn_avatar(&mut commands, models, desired, head.clone());
             }
         }
         None => {
             if let Some(models) = models.as_ref() {
-                spawn_avatar(&mut commands, models, desired);
+                spawn_avatar(&mut commands, models, desired, head.clone());
             }
         }
     }
@@ -1183,7 +1280,12 @@ fn sync_avatar_scene(
 /// child `SceneBundle` holding the rigged model selected by the avatar path.
 /// The child's `AnimationPlayer` is linked by `link_avatar_players` once the
 /// scene loads. Mirrors the pose applied by `apply_avatar_pose`.
-fn spawn_avatar(commands: &mut Commands, models: &AvatarModels, path: String) {
+fn spawn_avatar(
+    commands: &mut Commands,
+    models: &AvatarModels,
+    path: String,
+    head: Option<(Handle<Mesh>, Handle<StandardMaterial>)>,
+) {
     let kind = AvatarKind::for_path(&path);
     let model = models.model(kind);
     let root = commands
@@ -1214,6 +1316,9 @@ fn spawn_avatar(commands: &mut Commands, models: &AvatarModels, path: String) {
             },
             AvatarScene,
         ));
+        if let Some((mesh, material)) = head {
+            spawn_roblox_head(parent, &mesh, &material);
+        }
     });
 }
 
@@ -1264,6 +1369,26 @@ fn attach_cosmetics(
     }
 }
 
+/// Spawns the Roblox-R16-style head shell as a child of an avatar root: a
+/// rounded yellow cylinder at the Head attachment point that swallows the
+/// baked head. Inherits the root transform (position/facing); walk animation
+/// and attachment offsets are untouched.
+fn spawn_roblox_head(
+    parent: &mut ChildBuilder,
+    mesh: &Handle<Mesh>,
+    material: &Handle<StandardMaterial>,
+) {
+    parent.spawn((
+        MaterialMeshBundle {
+            mesh: mesh.clone(),
+            material: material.clone(),
+            transform: Transform::from_translation(attachment_offset(AttachmentPoint::Head)),
+            ..default()
+        },
+        RobloxHead,
+    ));
+}
+
 /// World-space offset of each attachment point relative to the avatar root.
 fn attachment_offset(point: AttachmentPoint) -> Vec3 {
     match point {
@@ -1285,6 +1410,8 @@ fn sync_remote_avatars(
     runtime: Res<WasmRuntime>,
     mut commands: Commands,
     models: Option<Res<AvatarModels>>,
+    head_mesh: Option<Res<RobloxHeadMesh>>,
+    head_material: Option<Res<RobloxHeadMaterial>>,
     mut avatars: Query<(Entity, &RemotePeerId, &mut Transform)>,
 ) {
     let now = Instant::now();
@@ -1355,6 +1482,11 @@ fn sync_remote_avatars(
                         // Only the local avatar casts shadows (cheaper shadow pass).
                         NotShadowCaster,
                     ));
+                    if let (Some(mesh), Some(material)) =
+                        (head_mesh.as_ref(), head_material.as_ref())
+                    {
+                        spawn_roblox_head(parent, &mesh.0, &material.0);
+                    }
                 });
             }
         }
@@ -1515,6 +1647,14 @@ fn setup_scene(
     let human_scene = asset_server.load::<Gltf>("avatars/human.glb");
     commands.insert_resource(AvatarGltfLoads { human: human_scene });
     commands.insert_resource(WorldObjectMeshHandle(meshes.add(Cuboid::new(1.0, 1.0, 1.0))));
+    // Roblox-R16-style rounded cylinder head shell (classic yellow), attached
+    // per-avatar at the Head point by `attach_roblox_heads`.
+    commands.insert_resource(RobloxHeadMesh(meshes.add(roblox_head_mesh())));
+    commands.insert_resource(RobloxHeadMaterial(materials.add(StandardMaterial {
+        base_color: Color::srgb_u8(245, 205, 48),
+        perceptual_roughness: 0.6,
+        ..default()
+    })));
 
     commands.spawn((
         TextBundle::from_section(
@@ -1545,6 +1685,40 @@ mod avatar_tests {
         assert_eq!(AvatarKind::for_path("avatar_standard.glb"), AvatarKind::Human);
         assert_eq!(AvatarKind::for_path("avatars/fox.glb"), AvatarKind::Fox);
         assert_eq!(AvatarKind::for_path("fox.glb"), AvatarKind::Fox);
+    }
+
+    #[test]
+    fn roblox_head_mesh_is_closed_and_bounded() {
+        let mesh = roblox_head_mesh();
+        let positions: Vec<[f32; 3]> = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .expect("head mesh has positions")
+            .as_float3()
+            .expect("positions are float3")
+            .to_vec();
+        assert!(!positions.is_empty(), "head mesh has vertices");
+        assert!(
+            mesh.indices().is_some(),
+            "head mesh is indexed"
+        );
+        // Radius ~0.22, half-height ~0.21: nothing escapes a 0.5 box.
+        for p in &positions {
+            assert!(p[0].abs() <= 0.25, "x in radius: {p:?}");
+            assert!(p[2].abs() <= 0.25, "z in radius: {p:?}");
+            assert!(p[1].abs() <= 0.22, "y in height: {p:?}");
+        }
+        // Normals exist and are unit length.
+        let normals: Vec<[f32; 3]> = mesh
+            .attribute(Mesh::ATTRIBUTE_NORMAL)
+            .expect("head mesh has normals")
+            .as_float3()
+            .expect("normals are float3")
+            .to_vec();
+        assert_eq!(normals.len(), positions.len());
+        for n in &normals {
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            assert!((len - 1.0).abs() < 1e-4, "unit normal: {n:?}");
+        }
     }
 
     #[test]
