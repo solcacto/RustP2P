@@ -1012,19 +1012,24 @@ fn sync_world_objects(
     list.clear();
 }
 
+/// Center of the Roblox head shell in avatar-root units, derived from the
+/// measured CesiumMan bounds (head verts span model z 1.16..1.51, i.e. root
+/// y 2.03..2.64 at scale 1.75 + lift 0.0; center ~2.4 with margin for walk bob).
+pub const ROBLOX_HEAD_CENTER: Vec3 = Vec3::new(0.0, 2.40, 0.0);
+
 /// Builds a Roblox-R16-style head: a short vertical cylinder with rounded
 /// top/bottom edges, generated as a surface of revolution around +Y.
 ///
-/// Sized (radius 0.22, height ~0.42 in avatar-root units) to swallow the baked
-/// CesiumMan head at the Head attachment point. Returns position, normal, uv
-/// triples plus a triangle index list with outward-facing winding.
+/// Sized (radius 0.30, height 0.60 in avatar-root units) to swallow the baked
+/// CesiumMan head. Returns position, normal, uv triples plus a triangle index
+/// list with outward-facing winding.
 fn roblox_head_mesh() -> Mesh {
     use bevy::render::mesh::{Indices, PrimitiveTopology};
     use std::f32::consts::{FRAC_PI_2, PI};
 
-    const RADIUS: f32 = 0.22;
-    const HALF_H: f32 = 0.15;
-    const CORNER: f32 = 0.06;
+    const RADIUS: f32 = 0.30;
+    const HALF_H: f32 = 0.30;
+    const CORNER: f32 = 0.08;
     const SEGMENTS: usize = 28;
     const ARC_STEPS: usize = 6;
 
@@ -1225,10 +1230,11 @@ fn build_avatar_models(
                 scene,
                 graph,
                 walk,
-                // CesiumMan is 1.14 units tall with feet at y=-0.569; raise and
-                // scale so it reads as a ~2-unit avatar standing on the plane.
+                // CesiumMan spans z 0..1.51 in model space (Z-up authored;
+                // feet at z=0, crown at z=1.51 — measured from the mesh).
+                // Scale only: feet land exactly on the plane at root y=0.
                 scale: 1.75,
-                lift: 1.0,
+                lift: 0.0,
             },
         });
         println!("[avatar] human rig loaded (walk clip node {walk:?})");
@@ -1316,8 +1322,11 @@ fn spawn_avatar(
             },
             AvatarScene,
         ));
-        if let Some((mesh, material)) = head {
-            spawn_roblox_head(parent, &mesh, &material);
+        // Shell is modeled for the CesiumMan head; other kinds skip it.
+        if kind == AvatarKind::Human {
+            if let Some((mesh, material)) = head {
+                spawn_roblox_head(parent, &mesh, &material);
+            }
         }
     });
 }
@@ -1370,9 +1379,9 @@ fn attach_cosmetics(
 }
 
 /// Spawns the Roblox-R16-style head shell as a child of an avatar root: a
-/// rounded yellow cylinder at the Head attachment point that swallows the
-/// baked head. Inherits the root transform (position/facing); walk animation
-/// and attachment offsets are untouched.
+/// rounded yellow cylinder at [`ROBLOX_HEAD_CENTER`] that swallows the baked
+/// head. Inherits the root transform (position/facing); walk animation and
+/// attachment offsets are untouched.
 fn spawn_roblox_head(
     parent: &mut ChildBuilder,
     mesh: &Handle<Mesh>,
@@ -1382,7 +1391,7 @@ fn spawn_roblox_head(
         MaterialMeshBundle {
             mesh: mesh.clone(),
             material: material.clone(),
-            transform: Transform::from_translation(attachment_offset(AttachmentPoint::Head)),
+            transform: Transform::from_translation(ROBLOX_HEAD_CENTER),
             ..default()
         },
         RobloxHead,
@@ -1482,10 +1491,12 @@ fn sync_remote_avatars(
                         // Only the local avatar casts shadows (cheaper shadow pass).
                         NotShadowCaster,
                     ));
-                    if let (Some(mesh), Some(material)) =
-                        (head_mesh.as_ref(), head_material.as_ref())
-                    {
-                        spawn_roblox_head(parent, &mesh.0, &material.0);
+                    if kind == AvatarKind::Human {
+                        if let (Some(mesh), Some(material)) =
+                            (head_mesh.as_ref(), head_material.as_ref())
+                        {
+                            spawn_roblox_head(parent, &mesh.0, &material.0);
+                        }
                     }
                 });
             }
@@ -1701,11 +1712,11 @@ mod avatar_tests {
             mesh.indices().is_some(),
             "head mesh is indexed"
         );
-        // Radius ~0.22, half-height ~0.21: nothing escapes a 0.5 box.
+        // Radius 0.30, half-height 0.30: nothing escapes a 0.65 box.
         for p in &positions {
-            assert!(p[0].abs() <= 0.25, "x in radius: {p:?}");
-            assert!(p[2].abs() <= 0.25, "z in radius: {p:?}");
-            assert!(p[1].abs() <= 0.22, "y in height: {p:?}");
+            assert!(p[0].abs() <= 0.32, "x in radius: {p:?}");
+            assert!(p[2].abs() <= 0.32, "z in radius: {p:?}");
+            assert!(p[1].abs() <= 0.32, "y in height: {p:?}");
         }
         // Normals exist and are unit length.
         let normals: Vec<[f32; 3]> = mesh
