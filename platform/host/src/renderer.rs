@@ -1012,24 +1012,26 @@ fn sync_world_objects(
     list.clear();
 }
 
-/// Center of the Roblox head shell in avatar-root units, derived from the
-/// measured CesiumMan bounds (head verts span model z 1.16..1.51, i.e. root
-/// y 2.03..2.64 at scale 1.75 + lift 0.0; center ~2.4 with margin for walk bob).
-pub const ROBLOX_HEAD_CENTER: Vec3 = Vec3::new(0.0, 2.40, 0.0);
+/// Head-center offset in `Skeleton_neck_joint_2` local space, measured from
+/// the CesiumMan mesh (head-center armature pos vs. joint pos composed with
+/// real matrix math). The joint's local +X points up in model space.
+pub const ROBLOX_HEAD_BONE_OFFSET: Vec3 = Vec3::new(0.203, -0.026, 0.006);
 
 /// Builds a Roblox-R16-style head: a short vertical cylinder with rounded
 /// top/bottom edges, generated as a surface of revolution around +Y.
 ///
-/// Sized (radius 0.30, height 0.60 in avatar-root units) to swallow the baked
-/// CesiumMan head. Returns position, normal, uv triples plus a triangle index
-/// list with outward-facing winding.
+/// Sized in head-bone local units (radius 0.17, height 0.32 — head verts span
+/// ±0.13/±0.14 with margin) to swallow the baked CesiumMan skull. The shell
+/// is rotated -90° about Z on attach so its axis follows the joint's +X (up).
+/// Returns position, normal, uv triples plus a triangle index list with
+/// outward-facing winding.
 fn roblox_head_mesh() -> Mesh {
     use bevy::render::mesh::{Indices, PrimitiveTopology};
     use std::f32::consts::{FRAC_PI_2, PI};
 
-    const RADIUS: f32 = 0.30;
-    const HALF_H: f32 = 0.30;
-    const CORNER: f32 = 0.08;
+    const RADIUS: f32 = 0.17;
+    const HALF_H: f32 = 0.16;
+    const CORNER: f32 = 0.05;
     const SEGMENTS: usize = 28;
     const ARC_STEPS: usize = 6;
 
@@ -1249,8 +1251,6 @@ fn sync_avatar_scene(
     runtime: Res<WasmRuntime>,
     mut commands: Commands,
     models: Option<Res<AvatarModels>>,
-    head_mesh: Option<Res<RobloxHeadMesh>>,
-    head_material: Option<Res<RobloxHeadMaterial>>,
     avatars: Query<(Entity, &AvatarSource), With<Avatar>>,
 ) {
     let desired = runtime
@@ -1260,10 +1260,6 @@ fn sync_avatar_scene(
         .data()
         .avatar_path()
         .to_string();
-    let head = head_mesh
-        .as_ref()
-        .zip(head_material.as_ref())
-        .map(|(m, mat)| (m.0.clone(), mat.0.clone()));
     match avatars.iter().next() {
         Some((entity, source)) if source.0 == desired => {
             let _ = entity;
@@ -1271,12 +1267,12 @@ fn sync_avatar_scene(
         Some((entity, _)) => {
             commands.entity(entity).despawn();
             if let Some(models) = models.as_ref() {
-                spawn_avatar(&mut commands, models, desired, head.clone());
+                spawn_avatar(&mut commands, models, desired);
             }
         }
         None => {
             if let Some(models) = models.as_ref() {
-                spawn_avatar(&mut commands, models, desired, head.clone());
+                spawn_avatar(&mut commands, models, desired);
             }
         }
     }
@@ -1286,12 +1282,7 @@ fn sync_avatar_scene(
 /// child `SceneBundle` holding the rigged model selected by the avatar path.
 /// The child's `AnimationPlayer` is linked by `link_avatar_players` once the
 /// scene loads. Mirrors the pose applied by `apply_avatar_pose`.
-fn spawn_avatar(
-    commands: &mut Commands,
-    models: &AvatarModels,
-    path: String,
-    head: Option<(Handle<Mesh>, Handle<StandardMaterial>)>,
-) {
+fn spawn_avatar(commands: &mut Commands, models: &AvatarModels, path: String) {
     let kind = AvatarKind::for_path(&path);
     let model = models.model(kind);
     let root = commands
@@ -1322,12 +1313,6 @@ fn spawn_avatar(
             },
             AvatarScene,
         ));
-        // Shell is modeled for the CesiumMan head; other kinds skip it.
-        if kind == AvatarKind::Human {
-            if let Some((mesh, material)) = head {
-                spawn_roblox_head(parent, &mesh, &material);
-            }
-        }
     });
 }
 
@@ -1378,24 +1363,38 @@ fn attach_cosmetics(
     }
 }
 
-/// Spawns the Roblox-R16-style head shell as a child of an avatar root: a
-/// rounded yellow cylinder at [`ROBLOX_HEAD_CENTER`] that swallows the baked
-/// head. Inherits the root transform (position/facing); walk animation and
-/// attachment offsets are untouched.
+/// Name of the CesiumMan head joint. The shell parents to this bone (not the
+/// avatar root) so it tracks the walk-animation head sway exactly instead of
+/// fighting it. Other models lack this node and simply get no shell.
+pub const ROBLOX_HEAD_BONE: &str = "Skeleton_neck_joint_2";
+
+/// Spawns the Roblox-R16-style head shell as a child of the head bone: a
+/// rounded yellow cylinder that swallows the baked skull and follows it
+/// through the walk animation. Walk animation and attachment offsets are
+/// untouched.
 fn spawn_roblox_head(
-    parent: &mut ChildBuilder,
+    commands: &mut Commands,
+    bone: Entity,
     mesh: &Handle<Mesh>,
     material: &Handle<StandardMaterial>,
 ) {
-    parent.spawn((
-        MaterialMeshBundle {
-            mesh: mesh.clone(),
-            material: material.clone(),
-            transform: Transform::from_translation(ROBLOX_HEAD_CENTER),
-            ..default()
-        },
-        RobloxHead,
-    ));
+    use std::f32::consts::FRAC_PI_2;
+    commands.entity(bone).with_children(|parent| {
+        parent.spawn((
+            MaterialMeshBundle {
+                mesh: mesh.clone(),
+                material: material.clone(),
+                transform: Transform {
+                    translation: ROBLOX_HEAD_BONE_OFFSET,
+                    // Mesh axis is +Y; the joint's up is +X.
+                    rotation: Quat::from_rotation_z(-FRAC_PI_2),
+                    ..default()
+                },
+                ..default()
+            },
+            RobloxHead,
+        ));
+    });
 }
 
 /// World-space offset of each attachment point relative to the avatar root.
@@ -1419,8 +1418,6 @@ fn sync_remote_avatars(
     runtime: Res<WasmRuntime>,
     mut commands: Commands,
     models: Option<Res<AvatarModels>>,
-    head_mesh: Option<Res<RobloxHeadMesh>>,
-    head_material: Option<Res<RobloxHeadMaterial>>,
     mut avatars: Query<(Entity, &RemotePeerId, &mut Transform)>,
 ) {
     let now = Instant::now();
@@ -1491,13 +1488,6 @@ fn sync_remote_avatars(
                         // Only the local avatar casts shadows (cheaper shadow pass).
                         NotShadowCaster,
                     ));
-                    if kind == AvatarKind::Human {
-                        if let (Some(mesh), Some(material)) =
-                            (head_mesh.as_ref(), head_material.as_ref())
-                        {
-                            spawn_roblox_head(parent, &mesh.0, &material.0);
-                        }
-                    }
                 });
             }
         }
@@ -1507,8 +1497,9 @@ fn sync_remote_avatars(
 /// Links each avatar's rigged scene to its `AnimationPlayer` once the scene has
 /// loaded (Bevy auto-adds the player to the spawned scene). Walks up the parent
 /// chain to find the owning avatar root, attaches the model's animation graph,
-/// freezes the clip at its neutral stance, and records the player entity on the
-/// root so `animate_avatars` can drive it.
+/// freezes the clip at its neutral stance, records the player entity on the
+/// root so `animate_avatars` can drive it, and parents the Roblox head shell
+/// to the head bone so it tracks the walk-animation sway.
 fn link_avatar_players(
     mut commands: Commands,
     models: Option<Res<AvatarModels>>,
@@ -1516,6 +1507,9 @@ fn link_avatar_players(
     mut players: Query<(Entity, &mut AnimationPlayer), Added<AnimationPlayer>>,
     markers: Query<(Entity, Option<&Avatar>, Option<&RemoteAvatar>)>,
     parents: Query<&Parent>,
+    bones: Query<(Entity, &Name)>,
+    head_mesh: Option<Res<RobloxHeadMesh>>,
+    head_material: Option<Res<RobloxHeadMaterial>>,
 ) {
     let Some(models) = models else { return };
     for (player_entity, mut player) in &mut players {
@@ -1547,6 +1541,35 @@ fn link_avatar_players(
         commands.entity(player_entity).insert((AvatarPlayer, model.graph.clone()));
         if let Ok((_, mut anim)) = avatars.get_mut(root) {
             anim.player = player_entity;
+        }
+
+        // Parent the Roblox head shell to this avatar's head bone (found by
+        // name under the same root). Bone-children inherit the walk-animation
+        // sway, so the shell can never lag behind the skull it covers.
+        if let (Some(mesh), Some(material)) =
+            (head_mesh.as_ref(), head_material.as_ref())
+        {
+            for (bone, name) in &bones {
+                if name.as_str() != ROBLOX_HEAD_BONE {
+                    continue;
+                }
+                let mut cur = bone;
+                let mut belongs = false;
+                loop {
+                    if cur == root {
+                        belongs = true;
+                        break;
+                    }
+                    match parents.get(cur) {
+                        Ok(parent) => cur = parent.get(),
+                        Err(_) => break,
+                    }
+                }
+                if belongs {
+                    spawn_roblox_head(&mut commands, bone, &mesh.0, &material.0);
+                    break;
+                }
+            }
         }
     }
 }
@@ -1712,11 +1735,11 @@ mod avatar_tests {
             mesh.indices().is_some(),
             "head mesh is indexed"
         );
-        // Radius 0.30, half-height 0.30: nothing escapes a 0.65 box.
+        // Radius 0.17, half-height 0.16: nothing escapes a 0.4 box.
         for p in &positions {
-            assert!(p[0].abs() <= 0.32, "x in radius: {p:?}");
-            assert!(p[2].abs() <= 0.32, "z in radius: {p:?}");
-            assert!(p[1].abs() <= 0.32, "y in height: {p:?}");
+            assert!(p[0].abs() <= 0.19, "x in radius: {p:?}");
+            assert!(p[2].abs() <= 0.19, "z in radius: {p:?}");
+            assert!(p[1].abs() <= 0.18, "y in height: {p:?}");
         }
         // Normals exist and are unit length.
         let normals: Vec<[f32; 3]> = mesh
