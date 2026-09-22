@@ -85,6 +85,7 @@ type PendingBatch = (Vec<Vec<u8>>, Instant);
 pub struct PeerConnection {
     peer_id: String,
     signal_addr: String,
+    game: String,
     udp: UdpSocket,
     ws: Option<WebSocket<TcpStream>>,
     peers: HashMap<String, SocketAddr>,
@@ -114,10 +115,22 @@ impl PeerConnection {
     /// `udp_bind` is the local bind address for the game socket, e.g.
     /// `"127.0.0.1:0"` to let the OS pick a free port.
     pub fn new(peer_id: impl Into<String>, signal_addr: &str, udp_bind: &str) -> Result<Self> {
+        Self::new_with_game(peer_id, signal_addr, udp_bind, "")
+    }
+
+    /// Same as [`Self::new`] but tags the registration with a game CID so
+    /// lobbies can discover sessions for that game via [`Self::list_peers`].
+    pub fn new_with_game(
+        peer_id: impl Into<String>,
+        signal_addr: &str,
+        udp_bind: &str,
+        game: &str,
+    ) -> Result<Self> {
         let peer_id = peer_id.into();
         let mut pc = Self {
             peer_id,
             signal_addr: signal_addr.to_string(),
+            game: game.to_string(),
             udp: Self::bind_udp(udp_bind)?,
             ws: Some(Self::open_ws(signal_addr)?),
             peers: HashMap::new(),
@@ -141,6 +154,7 @@ impl PeerConnection {
         Ok(Self {
             peer_id: peer_id.into(),
             signal_addr: String::new(),
+            game: String::new(),
             udp: Self::bind_udp(udp_bind)?,
             ws: None,
             peers: HashMap::new(),
@@ -184,6 +198,7 @@ impl PeerConnection {
             "type": "register",
             "peer_id": self.peer_id,
             "address": local_addr.to_string(),
+            "game": self.game,
         }))
     }
 
@@ -294,6 +309,100 @@ impl PeerConnection {
                 bail!("timed out waiting for connection info from '{target}'");
             }
         }
+    }
+
+    /// Short-timeout connect attempt used by lobby mode: returns Ok on success,
+    /// Err immediately after `timeout` instead of the 5s blocking retry.
+    pub fn try_connect(&mut self, target: &str, timeout: Duration) -> Result<SocketAddr> {
+        self.send_signal(&json!({
+            "type": "request_connection",
+            "from_peer": self.peer_id,
+            "to_peer": target,
+        }))?;
+        self.wait_for_connection_info(target, timeout)
+    }
+
+    /// Queries the signaling server for currently registered peers,
+    /// optionally filtered by game CID. Returns (peer_id, address, game).
+    pub fn list_peers(&mut self, game: &str) -> Result<Vec<(String, SocketAddr, String)>> {
+        self.send_signal(&json!({
+            "type": "list_peers",
+            "game": game,
+        }))?;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let v = self.read_signal()?;
+            match v["type"].as_str() {
+                Some("peer_list") => {
+                    let mut out = Vec::new();
+                    if let Some(peers) = v["peers"].as_array() {
+                        for p in peers {
+                            let (Some(pid), Some(addr_str)) = (
+                                p["peer_id"].as_str(),
+                                p["address"].as_str(),
+                            ) else { continue };
+                            if pid == self.peer_id {
+                                continue;
+                            }
+                            let Ok(addr): Result<SocketAddr, _> = addr_str.parse() else { continue };
+                            let g = p["game"].as_str().unwrap_or("").to_string();
+                            out.push((pid.to_string(), addr, g));
+                        }
+                    }
+                    return Ok(out);
+                }
+                Some("connection_info") => {
+                    // Buffer late-join info arriving mid-query instead of dropping.
+                    if let (Some(pid), Some(addr_str)) =
+                        (v["peer_id"].as_str(), v["address"].as_str())
+                    {
+                        if let Ok(addr) = addr_str.parse() {
+                            self.peers.insert(pid.to_string(), addr);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            if Instant::now() >= deadline {
+                bail!("timed out waiting for peer list");
+            }
+        }
+    }
+
+    /// Non-blocking drain of pending signaling messages. Inserts any
+    /// `connection_info` arrivals (late joiners) into the peer map.
+    /// Returns the number of new peers learned. Never blocks.
+    pub fn poll_signaling(&mut self) -> usize {
+        let Some(ws) = self.ws.as_mut() else { return 0 };
+        let mut learned = 0;
+        loop {
+            match ws.read() {
+                Ok(Message::Text(t)) => {
+                    let Ok(v): Result<Value, _> = serde_json::from_str(t.as_str()) else { continue };
+                    if v["type"].as_str() == Some("connection_info") {
+                        if let (Some(pid), Some(addr_str)) =
+                            (v["peer_id"].as_str(), v["address"].as_str())
+                        {
+                            if let Ok(addr) = addr_str.parse() {
+                                if self.peers.insert(pid.to_string(), addr).is_none() {
+                                    println!("[net] late joiner '{}' @ {}", pid, addr);
+                                    learned += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(e))
+                    if e.kind() == io::ErrorKind::TimedOut
+                        || e.kind() == io::ErrorKind::WouldBlock =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        learned
     }
 
     /// Sends `data` as a single UDP datagram to `addr`, returning the number of

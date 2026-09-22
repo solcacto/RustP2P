@@ -416,6 +416,11 @@ fn wasm_render_tick(runtime: Res<WasmRuntime>, stats: Res<SharedFrameStats>) {
         let store = &mut *guard;
         store.data_mut().update_frame();
         let net_start = std::time::Instant::now();
+        // Accept late joiners: drain pending signaling arrivals (non-blocking)
+        // before polling UDP so a host already in-game learns new peers.
+        if let Some(pc) = store.data_mut().peer_connection_mut() {
+            pc.poll_signaling();
+        }
         poll_network(store);
         // Flush batched messages (≤16ms window) and retry unacked reliable
         // messages once per frame.

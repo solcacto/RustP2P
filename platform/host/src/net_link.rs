@@ -410,6 +410,52 @@ impl NetLink {
         }
     }
 
+    /// Game-aware constructor for lobby mode (UDP path tags register with
+    /// game CID; WebRTC path ignores game for now).
+    pub fn new_with_game(
+        local_id: impl Into<String>,
+        signal_addr: &str,
+        udp_bind: &str,
+        ice_servers: Vec<RTCIceServer>,
+        game: &str,
+    ) -> Result<Self> {
+        let trimmed = signal_addr.trim_end_matches('/');
+        if trimmed.starts_with("ws://") || trimmed.starts_with("wss://") {
+            NetLink::new(local_id, signal_addr, udp_bind, ice_servers)
+        } else {
+            Ok(NetLink::Udp(Box::new(PeerConnection::new_with_game(
+                local_id,
+                signal_addr,
+                udp_bind,
+                game,
+            )?)))
+        }
+    }
+
+    /// Lobby query: currently registered peers for `game` (UDP only).
+    pub fn list_peers(&mut self, game: &str) -> Result<Vec<(String, SocketAddr, String)>> {
+        match self {
+            NetLink::Udp(pc) => pc.list_peers(game),
+            NetLink::Webrtc(_) => Ok(Vec::new()),
+        }
+    }
+
+    /// Short-timeout connect for lobby join (UDP only; WebRTC uses full handshake).
+    pub fn try_connect(&mut self, target: &str, timeout: Duration) -> Result<SocketAddr> {
+        match self {
+            NetLink::Udp(pc) => pc.try_connect(target, timeout),
+            NetLink::Webrtc(s) => s.request_connection(target),
+        }
+    }
+
+    /// Non-blocking drain of pending signaling arrivals (late joiners).
+    pub fn poll_signaling(&mut self) -> usize {
+        match self {
+            NetLink::Udp(pc) => pc.poll_signaling(),
+            NetLink::Webrtc(_) => 0,
+        }
+    }
+
     /// UDP-only diagnostic: blocks until the connection_info for `target`
     /// arrives. Not meaningful over a WebRTC link.
     pub fn wait_for_connection_info(

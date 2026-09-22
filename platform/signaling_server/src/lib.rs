@@ -29,6 +29,8 @@ struct PeerInfo {
     /// Unique per-connection id so a peer's connections can be told apart.
     id: u64,
     address: String,
+    /// Game CID this connection is lobbying for ("" = none / legacy).
+    game: String,
     outbox: Sender<String>,
 }
 
@@ -72,6 +74,7 @@ fn handle_peer(stream: TcpStream, peers: PeerRegistry) -> Result<()> {
         .as_str()
         .context("missing address")?
         .to_string();
+    let game = register["game"].as_str().unwrap_or("").to_string();
 
     let conn_id = NEXT_CONN_ID.fetch_add(1, Ordering::SeqCst);
     let (outbox_tx, outbox_rx) = std::sync::mpsc::channel::<String>();
@@ -83,6 +86,7 @@ fn handle_peer(stream: TcpStream, peers: PeerRegistry) -> Result<()> {
         .push(PeerInfo {
             id: conn_id,
             address,
+            game,
             outbox: outbox_tx,
         });
     println!(
@@ -196,6 +200,34 @@ fn handle_signal(v: &Value, from_peer: &str, conn_id: u64, peers: &PeerRegistry)
                         json!({"type":"connection_info","peer_id": to_peer, "address": to_address})
                             .to_string(),
                     )?;
+                }
+            }
+        }
+        Some("list_peers") => {
+            // Return all currently registered peers (optionally filtered by
+            // game) to the requester only, so a lobby can find a host.
+            let filter = v["game"].as_str().unwrap_or("");
+            let list: Vec<Value> = {
+                let registry = peers.lock().unwrap();
+                let mut out = Vec::new();
+                for (pid, infos) in registry.iter() {
+                    for info in infos {
+                        if filter.is_empty() || info.game == filter {
+                            out.push(json!({
+                                "peer_id": pid,
+                                "address": info.address,
+                                "game": info.game,
+                            }));
+                        }
+                    }
+                }
+                out
+            };
+            let reply = json!({"type":"peer_list","peers": list}).to_string();
+            let registry = peers.lock().unwrap();
+            if let Some(from_list) = registry.get(from_peer) {
+                for info in from_list {
+                    let _ = info.outbox.send(reply.clone());
                 }
             }
         }

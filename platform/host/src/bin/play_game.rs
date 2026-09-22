@@ -116,9 +116,27 @@ fn main() -> Result<()> {
     if role != "A" && role != "B" {
         bail!("usage: play_game --role A|B [--cid <CID> | --package <dir>] [--ipfs <api>] [--avatar <path>] [--cosmetic <manifest>] [--auto] [--frames N] [--no-exit] [--solo]");
     }
-    let local_id = format!("Peer{role}");
-    let remote_id = if role == "A" { "PeerB" } else { "PeerA" };
-    let axis: u8 = if role == "A" { 0 } else { 1 };
+    // Seamless lobby: --lobby <cid> auto-discovers a host or becomes one.
+    // Generates a unique peer id so multiple lobby members don't collide.
+    let lobby_cid = args
+        .iter()
+        .position(|a| a == "--lobby")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
+    let (local_id, remote_id, mut axis) = if lobby_cid.is_some() {
+        let uniq = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0)
+            % 9000
+            + 1000) as u32;
+        (format!("Peer{uniq}"), String::new(), 0u8)
+    } else {
+        let local = format!("Peer{role}");
+        let remote = if role == "A" { "PeerB" } else { "PeerA" }.to_string();
+        let ax: u8 = if role == "A" { 0 } else { 1 };
+        (local, remote, ax)
+    };
     let auto = args.iter().any(|a| a == "--auto");
     let no_exit = args.iter().any(|a| a == "--no-exit");
     let solo = args.iter().any(|a| a == "--solo");
@@ -293,18 +311,28 @@ fn main() -> Result<()> {
         .set_avatar_state(Some(avatar_state.clone()));
     store.data_mut().set_remote_avatars(remote_avatars.clone());
     store.data_mut().set_world_objects(world_objects.clone());
-    store.data_mut().set_movement_axis(axis);
     store.data_mut().set_avatar_path(avatar_path.clone());
     if solo {
         // Solo mode: no network link at all. The guest's network calls no-op
         // through the host (they return "no peer" gracefully), so a solo game
         // can still use input, chunk edits, and the HUD.
         println!("[{role}] solo mode — no network link (play as a single player)");
+    } else if let Some(ref lobby) = lobby_cid {
+        // Seamless lobby: connect, look for an existing host for this game,
+        // join if a slot is free, otherwise host and enter immediately.
+        // Never blocks the game on another player.
+        let mut link = connect_with_lobby(&local_id, lobby)?;
+        let max_players = manifest.max_players.max(1) as usize;
+        let (r, ax) = join_or_host(&mut link, lobby, max_players);
+        axis = ax;
+        println!("[lobby:{lobby}] entering as {r} (axis {ax})");
+        store.data_mut().set_peer_connection(Some(link));
     } else {
         store
             .data_mut()
             .set_peer_connection(Some(connect_with_retry(&local_id)?));
     }
+    store.data_mut().set_movement_axis(axis);
     let instance = linker.instantiate(&mut store, &module)?;
     let game_tick = instance.get_typed_func::<(), ()>(&mut store, "game_tick")?;
     println!(
@@ -312,10 +340,11 @@ fn main() -> Result<()> {
         manifest.wasm_entry
     );
 
-    // Block until the other instance is registered and a P2P link is up.
-    if !solo {
+    // Classic host/join path blocks until the peer arrives. Lobby mode skips
+    // this entirely (late joiners are accepted via per-frame poll_signaling).
+    if !solo && lobby_cid.is_none() {
         println!("[{role}] connecting to {remote_id} via signaling server...");
-        connect_to_peer(&mut store, remote_id)?;
+        connect_to_peer(&mut store, &remote_id)?;
         println!("[{role}] connected to {remote_id}");
     }
 
@@ -435,6 +464,58 @@ fn fetch_game_from_ipfs(ipfs: &host::ipfs::IpfsClient, cid: &str) -> Result<std:
         Err(e) => println!("[{cid}] warning: could not pin bundle: {e}"),
     }
     Ok(game_dir)
+}
+
+/// Lobby-aware connect: same as [`connect_with_retry`] but tags the
+/// registration with the game CID so other lobby members can discover us.
+fn connect_with_lobby(local_id: &str, game_cid: &str) -> Result<NetLink> {
+    let (signal, ice) = match DeploymentConfig::load(&config_path()) {
+        Ok(cfg) => (
+            cfg.network.signaling_url.clone(),
+            ice_servers_from_config(&cfg.network),
+        ),
+        Err(_) => (DEFAULT_SIGNAL_SERVER.to_string(), Vec::new()),
+    };
+    let deadline = Instant::now() + CONNECT_TIMEOUT;
+    loop {
+        match NetLink::new_with_game(local_id, &signal, "127.0.0.1:0", ice.clone(), game_cid) {
+            Ok(link) => return Ok(link),
+            Err(e) => {
+                if Instant::now() >= deadline {
+                    return Err(e.context("signaling server did not come up in time"));
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+    }
+}
+
+/// Seamless join-or-host: if a lobby host exists for this game and has a free
+/// slot, connect to it (role B); otherwise become the host (role A) and enter
+/// immediately — never blocks on another player.
+fn join_or_host(link: &mut NetLink, game_cid: &str, max_players: usize) -> (String, u8) {
+    let peers = link.list_peers(game_cid).unwrap_or_default();
+    // If the lobby is at max capacity, start a parallel session as host
+    // rather than erroring.
+    if peers.len() >= max_players.max(1) {
+        println!("[lobby:{game_cid}] session full ({} peers) — starting parallel session", peers.len());
+        return ("A".to_string(), 0);
+    }
+    if let Some((host_id, _addr, _game)) = peers.into_iter().next() {
+        println!("[lobby:{game_cid}] found host '{host_id}' — joining...");
+        match link.try_connect(&host_id, Duration::from_secs(3)) {
+            Ok(_) => {
+                println!("[lobby:{game_cid}] connected to '{host_id}'");
+                return ("B".to_string(), 1);
+            }
+            Err(e) => {
+                println!("[lobby:{game_cid}] join failed ({e:#}) — hosting instead");
+            }
+        }
+    } else {
+        println!("[lobby:{game_cid}] no host found — becoming host");
+    }
+    ("A".to_string(), 0)
 }
 
 /// Creates a network link (WebRTC through the deployed Worker, or UDP against

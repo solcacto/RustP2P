@@ -52,8 +52,6 @@ struct LauncherApp {
     child: Option<Child>,
     child_log: Arc<Mutex<VecDeque<String>>>,
     child_log_ui: VecDeque<String>,
-    /// Dialog state for session games: which game is pending a role choice.
-    pending_role: Option<GameListing>,
     /// Last action/error message shown in the status bar.
     status: String,
     last_refresh: Option<Instant>,
@@ -69,7 +67,6 @@ impl Default for LauncherApp {
             child: None,
             child_log: Arc::new(Mutex::new(VecDeque::new())),
             child_log_ui: VecDeque::new(),
-            pending_role: None,
             status: String::new(),
             last_refresh: None,
             logged_size: false,
@@ -160,13 +157,12 @@ impl LauncherApp {
         };
 
         let mut cmd = Command::new(&play_game);
-        cmd.arg("--cid")
-            .arg(&game.cid)
-            .arg("--role")
-            .arg(role.unwrap_or("A"))
-            .arg("--no-exit");
+        cmd.arg("--cid").arg(&game.cid).arg("--no-exit");
         if game.mode == "solo" {
-            cmd.arg("--solo");
+            cmd.arg("--solo").arg("--role").arg(role.unwrap_or("A"));
+        } else {
+            // Seamless session: join a live host or become one — no Host/Join prompt.
+            cmd.arg("--lobby").arg(&game.cid);
         }
         cmd.stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -328,43 +324,13 @@ impl eframe::App for LauncherApp {
             PanelAction::Refresh => self.refresh(),
             PanelAction::Render(list) => {
                 let clicked = self.render_game_grid(ctx, list);
+                // Solo games pass Some("A"); session games pass None and launch
+                // straight into seamless lobby (join-or-host).
                 if let Some((game, role)) = clicked {
-                    if let Some(role) = role {
-                        self.launch(&game, Some(&role));
-                    } else {
-                        self.pending_role = Some(game);
-                    }
+                    self.launch(&game, role.as_deref());
                 }
             }
             PanelAction::None => {}
-        }
-
-        // Role dialog for session games.
-        if let Some(game) = self.pending_role.clone() {
-            let mut close = false;
-            egui::Window::new("How will you play?").show(ctx, |ui| {
-                ui.label(format!(
-                    "{} is a multiplayer game. Host the session (role A) or join another player's session (role B)?",
-                    game.name
-                ));
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Host session").clicked() {
-                        self.launch(&game, Some("A"));
-                        close = true;
-                    }
-                    if ui.button("Join session").clicked() {
-                        self.launch(&game, Some("B"));
-                        close = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        close = true;
-                    }
-                });
-            });
-            if close {
-                self.pending_role = None;
-            }
         }
 
         ctx.request_repaint_after(Duration::from_millis(100));
