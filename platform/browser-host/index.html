@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RustP2P Browser Games</title>
+<style>
+  body { margin: 0; background: #101018; color: #eee; font-family: system-ui, sans-serif; }
+  header { padding: 24px; text-align: center; }
+  header p { color: #8899bb; }
+  #games { display: flex; flex-wrap: wrap; gap: 16px; justify-content: center; padding: 16px; }
+  .card { background: #1a1a28; border: 1px solid #333355; border-radius: 10px; padding: 20px; width: 260px; }
+  .card h2 { margin: 0 0 8px 0; }
+  .card p { color: #8899bb; min-height: 40px; }
+  .card a { display: inline-block; background: #4488ff; color: #fff; text-decoration: none;
+    padding: 8px 20px; border-radius: 6px; margin-top: 8px; }
+  .mode { font-size: 12px; color: #66dd99; }
+  #err { color: #f77; text-align: center; padding: 16px; font-family: monospace; }
+</style>
+</head>
+<body>
+<header>
+  <h1>RustP2P Browser Games</h1>
+  <p>Peer-to-peer games that run entirely in your browser. No installs.</p>
+</header>
+<div id="err"></div>
+<div id="games"></div>
+<script>
+async function boot() {
+  const err = document.getElementById("err");
+  let data;
+  try {
+    const res = await fetch("games/games.json");
+    if (!res.ok) { throw new Error("games.json not found (HTTP " + res.status + ")"); }
+    data = await res.json();
+  } catch (e) {
+    err.textContent = "Could not load game list: " + e + ". Serve over http(s), not file://.";
+    return;
+  }
+  const wrap = document.getElementById("games");
+  for (const g of (data.games || [])) {
+    const card = document.createElement("div");
+    card.className = "card";
+    const title = document.createElement("h2");
+    title.textContent = g.title || g.id;
+    const desc = document.createElement("p");
+    desc.textContent = g.description || "";
+    const mode = document.createElement("div");
+    mode.className = "mode";
+    mode.textContent = (g.mode === "multi" ? "Multiplayer" : "Single player");
+    const link = document.createElement("a");
+    link.href = "play.html?game=" + encodeURIComponent(g.id);
+    link.textContent = "Play";
+    card.append(title, desc, mode, link);
+    wrap.appendChild(card);
+  }
+  if (!wrap.children.length) { err.textContent = "No games listed yet."; }
+}
+boot();
+</script>
+</body>
+</html>

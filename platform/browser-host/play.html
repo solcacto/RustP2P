@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Play - RustP2P Browser Games</title>
+<style>
+  body { margin: 0; background: #101018; color: #eee; font-family: system-ui, sans-serif;
+    display: flex; flex-direction: column; align-items: center; }
+  #bar { width: 100%; max-width: 860px; display: flex; gap: 12px; align-items: center;
+    padding: 10px 16px; box-sizing: border-box; }
+  #bar a { color: #8899bb; text-decoration: none; }
+  #title { font-weight: bold; flex: 1; }
+  #hud { background: rgba(0,0,0,.5); padding: 4px 12px; border-radius: 6px; }
+  #net { font-size: 12px; color: #66dd99; }
+  canvas { background: #181822; border: 1px solid #333355; border-radius: 8px; }
+  #err { color: #f77; font-family: monospace; font-size: 12px; padding: 8px; white-space: pre-wrap; }
+  #help { color: #8899bb; font-size: 13px; padding: 8px; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <a href="index.html">&larr; Games</a>
+  <span id="title">Loading...</span>
+  <span id="hud">Score: 0</span>
+  <span id="net">Single player</span>
+</div>
+<canvas id="game" width="860" height="600"></canvas>
+<div id="err"></div>
+<div id="help">Move: WASD or arrow keys. Multiplayer arrives in a later update.</div>
+<script src="host.js"></script>
+<script>
+(async () => {
+  const err = document.getElementById("err");
+  try {
+    const id = new URLSearchParams(location.search).get("game");
+    if (!id) { throw new Error("no game selected"); }
+    await BrowserHost.play(id);
+  } catch (e) { err.textContent = String((e && e.message) || e); }
+})();
+</script>
+</body>
+</html>

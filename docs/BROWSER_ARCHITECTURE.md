@@ -146,3 +146,15 @@ native UDP, touch native game flow, or add Node.js anywhere.
   minimal movement game (box avatars, no assets)?
 - Is browser-to-native play (vs browser-to-browser) in scope for Phase 4?
 - InfinityFree PHP scope: accounts/leaderboards now, or after multiplayer?
+
+## 11. MVP status (single-player core, this branch)
+
+Shipped in `platform/browser-host/`: `index.html` landing (reads
+`games/games.json`), `play.html` player page, `host.js` (full 28-import env
+shim, rAF loop, keyboard + gamepad, Canvas 2D top-down renderer, graceful
+trap handling), and a `dodge` template game (Rust guest SDK, wasm built
+in-repo). The planned `net.js`/`render.js`/`store.js` split is folded into
+`host.js` for now, with `NET-STUB` markers where the WebRTC phase plugs in.
+Verified without a browser: wasm builds, imports are env-only (no WASI),
+every wasm import exists in the shim, JSON files parse. Live browser and
+multiplayer testing remain open (see §8 risks 2 and 5).

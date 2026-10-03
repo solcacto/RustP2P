@@ -1,0 +1,8 @@
+{
+  "id": "dodge",
+  "title": "Dodge",
+  "description": "Top-down arena collector. Grab coins, beat your best.",
+  "wasm": "game.wasm",
+  "mode": "single",
+  "controls": "WASD or arrows to move"
+}

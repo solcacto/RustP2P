@@ -1,0 +1,12 @@
+{
+  "games": [
+    {
+      "id": "dodge",
+      "title": "Dodge",
+      "description": "Top-down arena collector. Grab coins, beat your best.",
+      "dir": "dodge",
+      "wasm": "game.wasm",
+      "mode": "single"
+    }
+  ]
+}
